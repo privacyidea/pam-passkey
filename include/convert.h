@@ -7,7 +7,7 @@
 class Convert
 {
 public:
-	static std::vector<unsigned char> Base64Decode(const std::string& base64String);
+	static std::vector<unsigned char> Base64Decode(const std::string &base64String);
 	static std::vector<unsigned char> Base64URLDecode(const std::string &base64String);
 	static std::string Base64Encode(const unsigned char *data, const size_t size, bool padded = false);
 	static std::string Base64Encode(const std::vector<unsigned char> &data, bool padded = false);
@@ -28,5 +28,8 @@ public:
 	static std::string BytesToHex(std::vector<unsigned char> bytes);
 
 	static std::vector<unsigned char> HexToBytes(const std::string &hexString);
+
+	static std::string timeTToIso8601(time_t timestamp);
+	static time_t iso8601ToTimeT(const std::string &isoString);
 };
 #endif // CONVERT_H

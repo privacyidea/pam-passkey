@@ -31,9 +31,10 @@ Here is a list of all available configuration options:
 | `debug` | Enables verbose debug logging to syslog. | No | `debug` |
 | `nossl` | Disables SSL certificate verification for requests to the privacyIDEA server. **Use with caution, only for testing.** | No | `nossl` |
 | `realm` | The privacyIDEA realm to authenticate against. If not specified, the default realm is used. | No | `realm=my_realm` |
-| `offlineFile` | The path to the file used to store offline credentials. Defaults to `/etc/privacyidea/pam.txt`. The directory must be writable by the user running the authentication process if offline data needs to be updated. | No | `offlineFile=/var/lib/privacyidea/offline.json` |
+| `offlineFile` | The path to the file used to store offline credentials. Defaults to `/etc/privacyidea/fido-offline-credentials.txt`. The directory must be writable by the user running the authentication process if offline data needs to be updated. | No | `offlineFile=/var/lib/privacyidea/offline.json` |
 | `timeout` | The timeout in seconds for network requests to the privacyIDEA server. A value of `0` means no timeout. | No | `timeout=10` |
 | `noPIN` | Disables the requirement for a PIN during offline authentication. By default, a PIN is required for offline use. PIN requirement for online authentication is managed by the `webauthn_user_verification_requirement` policy in privacyIDEA. | No | `noPIN` |
+| `offlineExpiry` | The validity period for offline credentials in **days**. After this period, the credential must be refreshed online. Defaults to `30` days. A value of `0` disables expiry. | No | `offlineExpiry=90` |
 
 ---
 

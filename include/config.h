@@ -14,6 +14,7 @@ struct Config
     std::string promptText;
     std::string offlineFile;
     bool noPIN = false;
+    long offlineExpiry = 30; // Expiry time in days for offline credentials. 0 means no expiry.
 };
 
-#endif //PRIVACYIDEA_PAM_CONFIG_H
+#endif // PRIVACYIDEA_PAM_CONFIG_H

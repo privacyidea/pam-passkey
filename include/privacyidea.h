@@ -24,7 +24,7 @@
 class PrivacyIDEA
 {
 public:
-    PrivacyIDEA(pam_handle_t *pamh, std::string baseURL, std::string realm, bool sslVerify, std::string offlineFile, bool debug, long timeout);
+    PrivacyIDEA(pam_handle_t *pamh, std::string baseURL, std::string realm, bool sslVerify, std::string offlineFile, bool debug, long timeout, long offlineExpiryDays);
 
     ~PrivacyIDEA();
 
@@ -37,17 +37,19 @@ public:
 
     int parseResponse(const std::string &input, Response &out);
 
-    int offlineRefill(const std::string &user, const std::string &lastOTP, const std::string &serial);
-
     int validateCheckFIDO(const FIDOSignResponse &signResponse, const std::string &transactionId, const std::string &origin, Response &response, const std::string &user = "");
+
+    int offlineRefillFIDO(OfflineFIDOCredential &cred);
+
+    void refillAllOfflineCredentials();
 
     std::vector<OfflineFIDOCredential> findOfflineCredentialsForUser(const std::string &username) const;
 
-    std::optional<OfflineFIDOCredential> findOfflineCredential(const std::string& serial) const;
+    std::optional<OfflineFIDOCredential> findOfflineCredential(const std::string &serial) const;
 
     std::vector<OfflineFIDOCredential> getAllOfflineCredentials() const;
 
-    void updateSignCount(const std::string& serial, uint32_t newSignCount);
+    void updateSignCount(const std::string &serial, uint32_t newSignCount);
 
 private:
     pam_handle_t *pamh; // for syslog
@@ -57,14 +59,14 @@ private:
     bool sslVerify;
     std::string realm;
     long timeout = 0;
+    long offlineExpirySeconds = 0; // Stored internally in seconds
 
-    std::string offlineFile = "/etc/privacyidea/pam.txt";
+    std::string offlineFile = "/etc/privacyidea/fido-offline-credentials.txt";
     nlohmann::json offlineJson;
     std::vector<OfflineFIDOCredential> offlineData;
 
     std::string readAll(std::string file);
-    // Internal helper to get a mutable pointer for updates
-    OfflineFIDOCredential* _getMutableOfflineCredential(const std::string& serial);
+    OfflineFIDOCredential *_getMutableOfflineCredential(const std::string &serial);
 
     void writeAll(std::string file, std::string content);
 };
