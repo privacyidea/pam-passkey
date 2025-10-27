@@ -164,16 +164,17 @@ int PrivacyIDEA::validateCheck(const string &user, const string &pass, const str
     retval = sendRequest(baseURL + "/validate/check", param, headers, strResponse);
     if (retval != 0)
     {
-        // Do not abort in this case, offline authentication is still be possible
-        // TODO remove the log as it is expected in some cases?
-        pam_syslog(pamh, LOG_ERR, "Unable to send request to the privacyIDEA server. Error %d\n", retval);
+        // The request failed. Log a descriptive error and return immediately.
+        pam_syslog(pamh, LOG_ERR, "validateCheck: The request to the server failed with cURL error: %d (%s)", retval, curl_easy_strerror((CURLcode)retval));
+        return retval;
     }
+
     retval = parseResponse(strResponse, response);
     if (retval != 0)
     {
-        pam_syslog(pamh, LOG_ERR, "Unable to parse the response from the privacyIDEA server. Response: %s\n Error %d\n",
-                   strResponse.c_str(), retval);
+        pam_syslog(pamh, LOG_ERR, "validateCheck: Unable to parse the response from the privacyIDEA server. Error %d", retval);
     }
+
     return retval;
 }
 
@@ -387,19 +388,22 @@ int PrivacyIDEA::parseResponse(const std::string &input, Response &out)
         auto jDetail = jResponse["detail"];
         if (jDetail.contains("passkey") && jDetail["passkey"].is_object())
         {
-            FIDOSignRequest data;
-            const auto &passkey = jResponse["detail"]["passkey"];
-            if (passkey.contains("challenge"))
-                data.challenge = passkey["challenge"].get<std::string>();
-            if (passkey.contains("message"))
-                data.message = passkey["message"].get<std::string>();
-            if (passkey.contains("rpId"))
-                data.rpId = passkey["rpId"].get<std::string>();
-            if (passkey.contains("transaction_id"))
-                data.transaction_id = passkey["transaction_id"].get<std::string>();
-            if (passkey.contains("user_verification"))
-                data.userVerification = passkey["user_verification"].get<std::string>();
-            out.signRequest = data;
+            try {
+                FIDOSignRequest data;
+                const auto &passkey = jDetail.at("passkey");
+                passkey.at("challenge").get_to(data.challenge);
+                passkey.at("rpId").get_to(data.rpId);
+                passkey.at("transaction_id").get_to(data.transaction_id);
+                passkey.at("user_verification").get_to(data.userVerification);
+
+                // message is optional
+                if (passkey.contains("message")) {
+                    passkey.at("message").get_to(data.message);
+                }
+                out.signRequest = data;
+            } catch (const json::exception& e) {
+                pam_syslog(pamh, LOG_ERR, "Failed to parse passkey challenge from server response: %s", e.what());
+            }
         }
 
         if (jDetail.contains("username"))
