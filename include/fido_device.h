@@ -27,6 +27,7 @@
 #include "fido_sign_request.h"
 #include "fido_sign_response.h"
 #include "offline_fido_credential.h"
+#include <openssl/evp.h>
 // fido_init is now called once in pam_sm_authenticate, so fidoFlags is not needed here.
 // constexpr auto fidoFlags = FIDO_DISABLE_U2F_FALLBACK; // | FIDO_DEBUG;
 
@@ -83,7 +84,7 @@ private:
 
 	int ecKeyFromCbor(
 		const std::string &cborPubKey,
-		EC_KEY **ecKey,
+		EVP_PKEY **pkey,
 		int *algorithm) const;
 };
 

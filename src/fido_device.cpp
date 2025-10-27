@@ -5,6 +5,7 @@
 #include "fido_device.h"
 #include "privacyidea.h"
 #include "convert.h"
+#include <openssl/param_build.h>
 #include <sys/syslog.h>
 
 struct FidoDevDeleter
@@ -30,15 +31,15 @@ struct FidoAssertDeleter
 };
 using unique_fido_assert_t = std::unique_ptr<fido_assert_t, FidoAssertDeleter>;
 
-struct ECKeyDeleter
+struct EvpPkeyDeleter
 {
-	void operator()(EC_KEY *key) const
+	void operator()(EVP_PKEY *pkey) const
 	{
-		if (key)
-			EC_KEY_free(key);
+		if (pkey)
+			EVP_PKEY_free(pkey);
 	}
 };
-using unique_ec_key_t = std::unique_ptr<EC_KEY, ECKeyDeleter>;
+using unique_evp_pkey_t = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
 
 struct Es256PkDeleter
 {
@@ -66,7 +67,7 @@ constexpr auto cosePubKeyY = -3;
 
 int FIDODevice::ecKeyFromCbor(
 	const std::string &cborPubKey,
-	EC_KEY **ecKey,
+	EVP_PKEY **pkey,
 	int *algorithm) const
 {
 	int res = FIDO_OK;
@@ -130,12 +131,38 @@ int FIDODevice::ecKeyFromCbor(
 			}
 		}
 
-		*ecKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-		unique_bignum_t bnx(BN_new());
-		BN_bin2bn(x.data(), x.size(), bnx.get());
-		unique_bignum_t bny(BN_new());
-		BN_bin2bn(y.data(), y.size(), bny.get());
-		EC_KEY_set_public_key_affine_coordinates(*ecKey, bnx.get(), bny.get());
+		// OpenSSL 3.0+ way of creating a key from parameters
+		OSSL_PARAM_BLD *param_bld = OSSL_PARAM_BLD_new();
+		EVP_PKEY_CTX *ctx = nullptr;
+		if (param_bld)
+		{
+			OSSL_PARAM_BLD_push_utf8_string(param_bld, "group", "prime256v1", 0);
+			OSSL_PARAM_BLD_push_octet_string(param_bld, "pub", x.data(), x.size());
+			OSSL_PARAM_BLD_push_octet_string(param_bld, "pub", y.data(), y.size());
+
+			OSSL_PARAM *params = OSSL_PARAM_BLD_to_param(param_bld);
+			if (params)
+			{
+				ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+				if (ctx)
+				{
+					if (EVP_PKEY_fromdata_init(ctx) > 0 && EVP_PKEY_fromdata(ctx, pkey, EVP_PKEY_PUBLIC_KEY, params) > 0)
+					{
+						// Success
+					}
+					else
+					{
+						*pkey = nullptr;
+						res = FIDO_ERR_INTERNAL;
+					}
+					EVP_PKEY_CTX_free(ctx);
+				}
+				OSSL_PARAM_free(params);
+			}
+			OSSL_PARAM_BLD_free(param_bld);
+		}
+		if (*pkey == nullptr)
+			res = FIDO_ERR_INTERNAL;
 	}
 	else
 	{
@@ -237,10 +264,10 @@ int FIDODevice::signAndVerifyAssertion(
 
 	fido_assert_t *assert_raw = nullptr;
 	std::vector<unsigned char> cDataBytes;
-	int res = getAssert(signRequest, origin, pin, &assert_raw, cDataBytes); // The raw pointer is still named assert_raw here
+	int res = getAssert(signRequest, origin, pin, &assert_raw, cDataBytes);
 	unique_fido_assert_t fido_assertion(assert_raw);
 
-	unique_ec_key_t ecKey(nullptr);
+	unique_evp_pkey_t pkey(nullptr);
 	unique_es256_pk_t pk(es256_pk_new());
 	int algorithm = 0;
 
@@ -268,12 +295,12 @@ int FIDODevice::signAndVerifyAssertion(
 			return FIDO_ERR_INVALID_ARGUMENT;
 		}
 
-		EC_KEY *ecKey_raw = nullptr;
-		res = ecKeyFromCbor(credUsed->public_key_hex, &ecKey_raw, &algorithm); // This now returns a raw pointer
-		ecKey.reset(ecKey_raw);												   // The unique_ptr takes ownership
-		if (!ecKey)															   // Check the unique_ptr
+		EVP_PKEY *pkey_raw = nullptr;
+		res = ecKeyFromCbor(credUsed->public_key_hex, &pkey_raw, &algorithm);
+		pkey.reset(pkey_raw);
+		if (!pkey)
 		{
-			pam_syslog(_pamh, LOG_ERR, "Failed to create EC_KEY from public key CBOR.");
+			pam_syslog(_pamh, LOG_ERR, "Failed to create EVP_PKEY from public key CBOR.");
 			return FIDO_ERR_INTERNAL;
 		}
 
@@ -284,7 +311,7 @@ int FIDODevice::signAndVerifyAssertion(
 			return FIDO_ERR_UNSUPPORTED_OPTION;
 		}
 
-		res = es256_pk_from_EC_KEY(pk.get(), ecKey.get());
+		res = es256_pk_from_EVP_PKEY(pk.get(), pkey.get());
 		if (res == FIDO_OK)
 		{
 			res = fido_assert_verify(fido_assertion.get(), 0, algorithm, pk.get());
@@ -309,7 +336,7 @@ int FIDODevice::signAndVerifyAssertion(
 		}
 		else
 		{
-			pam_syslog(_pamh, LOG_ERR, "es256_pk_from_EC_KEY: %s (code: %d)", fido_strerr(res), res);
+			pam_syslog(_pamh, LOG_ERR, "es256_pk_from_EVP_PKEY: %s (code: %d)", fido_strerr(res), res);
 		}
 	}
 	else
