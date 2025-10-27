@@ -13,6 +13,7 @@ struct Config
     long timeout = 0; // Timeout in seconds for network requests. 0 means no timeout.
     std::string promptText;
     std::string offlineFile;
+    bool noPIN = false;
 };
 
 #endif //PRIVACYIDEA_PAM_CONFIG_H

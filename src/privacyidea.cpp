@@ -13,9 +13,28 @@
 #include <openssl/rand.h>
 #include <openssl/err.h>
 #include "json.hpp"
+#include "convert.h"
 
 using namespace std;
 using json = nlohmann::json;
+
+// This allows nlohmann::json to automatically convert JSON to and from the OfflineFIDOCredential struct.
+void from_json(const json& j, OfflineFIDOCredential& cred) {
+    j.at("pubKey").get_to(cred.public_key_hex);
+    j.at("username").get_to(cred.username);
+    // rpId is not part of the offline file, it is determined during offline auth
+    j.at("credentialId").get_to(cred.credId);
+    j.at("serial").get_to(cred.serial);
+    j.at("sign_count").get_to(cred.sign_count);
+}
+
+void to_json(json& j, const OfflineFIDOCredential& cred) {
+    j = json{{"pubKey", cred.public_key_hex},
+             {"username", cred.username},
+             {"credentialId", cred.credId},
+             {"serial", cred.serial},
+             {"sign_count", cred.sign_count}};
+}
 
 PrivacyIDEA::PrivacyIDEA(pam_handle_t *pamh, std::string baseURL, std::string realm, bool sslVerify, std::string offlineFile, bool debug, long timeout)
 {
@@ -36,9 +55,14 @@ PrivacyIDEA::PrivacyIDEA(pam_handle_t *pamh, std::string baseURL, std::string re
     {
         try
         {
-            offlineData = json::parse(content);
+            offlineJson = json::parse(content);
+            if (offlineJson.contains("fido_offline"))
+            {
+                // This will use the from_json function defined above
+                offlineJson.at("fido_offline").get_to(offlineData);
+            }
         }
-        catch (const json::parse_error &e)
+        catch (const std::exception &e)
         {
             // TODO keep this debug, because having the file is not required
             pam_syslog(pamh, LOG_DEBUG, "Unable to load offline data: %s", e.what());
@@ -48,15 +72,31 @@ PrivacyIDEA::PrivacyIDEA(pam_handle_t *pamh, std::string baseURL, std::string re
 
 PrivacyIDEA::~PrivacyIDEA()
 {
-    if (!offlineData.empty())
+    if (!offlineJson.empty())
     {
-        writeAll(offlineFile, offlineData.dump(4));
+        offlineJson["fido_offline"] = offlineData;
+        writeAll(offlineFile, offlineJson.dump(4));
     }
+}
+
+std::string getMachineId()
+{
+    std::ifstream machineIdFile("/etc/machine-id");
+    if (machineIdFile.is_open())
+    {
+        std::string machineId;
+        if (std::getline(machineIdFile, machineId))
+        {
+            return machineId;
+        }
+    }
+    return "";
 }
 
 int PrivacyIDEA::validateInitializePasskey(Response &response)
 {
     map<string, string> parameters = {{"type", "passkey"}};
+
     string r;
     int res = sendRequest(baseURL + "/validate/initialize", parameters, {}, r, false); // Use GET
     if (res != 0)
@@ -66,31 +106,6 @@ int PrivacyIDEA::validateInitializePasskey(Response &response)
     }
 
     return parseResponse(r, response);
-}
-
-std::string urlEncode(const std::string &input)
-{
-    std::ostringstream escaped;
-    escaped.fill('0');
-    escaped << std::hex;
-
-    for (auto c : input)
-    {
-        // Keep alphanumeric and other accepted characters intact
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
-        {
-            escaped << c;
-        }
-        // Any other characters are percent-encoded
-        else
-        {
-            escaped << std::uppercase;
-            escaped << '%' << std::setw(2) << int((unsigned char)c);
-            escaped << std::nouppercase;
-        }
-    }
-
-    return escaped.str();
 }
 
 size_t writeCallback(void *contents, size_t size, size_t nmemb, void *userp)
@@ -104,9 +119,7 @@ int PrivacyIDEA::validateCheck(const string &user, const string &pass, const str
 {
     int retval = 0;
     string strResponse;
-    map<string, string> param{
-        make_pair("user", user),
-        make_pair("pass", pass)};
+    map<string, string> param{make_pair("user", user), make_pair("pass", pass)};
 
     if (!transactionID.empty())
     {
@@ -126,14 +139,12 @@ int PrivacyIDEA::validateCheck(const string &user, const string &pass, const str
         // Do not abort in this case, offline authentication is still be possible
         // TODO remove the log as it is expected in some cases?
         pam_syslog(pamh, LOG_ERR, "Unable to send request to the privacyIDEA server. Error %d\n", retval);
-        // return PAM_AUTH_ERR;
     }
     retval = parseResponse(strResponse, response);
     if (retval != 0)
     {
         pam_syslog(pamh, LOG_ERR, "Unable to parse the response from the privacyIDEA server. Response: %s\n Error %d\n",
                    strResponse.c_str(), retval);
-        // return PAM_AUTH_ERR;
     }
     return retval;
 }
@@ -154,9 +165,10 @@ int PrivacyIDEA::sendRequest(const std::string &url, const std::map<std::string,
         {
             pam_syslog(pamh, LOG_DEBUG, "Sending request to %s with parameters:", url.c_str());
         }
+
         for (const auto &param : parameters)
         {
-            string tmp = param.first + "=" + urlEncode(param.second) + "&";
+            string tmp = param.first + "=" + Convert::UrlEncode(param.second) + "&";
             postData += tmp;
             if (debug)
             {
@@ -189,7 +201,16 @@ int PrivacyIDEA::sendRequest(const std::string &url, const std::map<std::string,
             string headerString = header.first + ": " + header.second;
             headers_list = curl_slist_append(headers_list, headerString.c_str());
         }
-        headers_list = curl_slist_append(headers_list, ("User-Agent: " + string(PAM_PRIVACYIDEA_USERAGENT)).c_str());
+
+        std::string ua = string(PAM_PRIVACYIDEA_USERAGENT);
+        std::string machineId = getMachineId();
+        if (!machineId.empty())
+        {
+            // This is required for offline to be able to identify the machine and refilltoken in the server
+            ua = ua + " ComputerName/" + machineId;
+        }
+
+        headers_list = curl_slist_append(headers_list, ("User-Agent: " + ua).c_str());
 
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers_list);
 
@@ -232,61 +253,64 @@ int PrivacyIDEA::offlineRefill(const std::string &user, const std::string &lastO
         pam_syslog(pamh, LOG_DEBUG, "Attempting offline refill for user %s with token %s", user.c_str(), serial.c_str());
     }
 
-    if (!offlineData.contains("offline") || !offlineData["offline"].is_array())
+    if (!offlineJson.contains("offline") || !offlineJson["offline"].is_array())
     {
         return OFFLINE_FILE_WRONG_FORMAT;
     }
 
-    for (auto &item : offlineData["offline"])
+    // This part seems to handle a different kind of offline data (OTP-based).
+    // It is left as-is, operating on the raw offlineJson object.
+    for (auto &item : offlineJson["offline"])
     {
-        if (item.contains("serial") && item["serial"].get<std::string>() == serial)
+        if (!item.contains("serial") || item["serial"].get<std::string>() != serial) {
+            continue;
+        }
+
+        map<string, string> parameters =
+            {
+                {"pass", lastOTP},
+                {"refilltoken", item["refilltoken"].get<std::string>()},
+                {"serial", serial}};
+        map<string, string> headers;
+        string response;
+        auto retval = sendRequest(baseURL + "/validate/offlinerefill", parameters, headers, response);
+        if (debug)
         {
-            map<string, string> parameters =
-                {
-                    {"pass", lastOTP},
-                    {"refilltoken", item["refilltoken"].get<std::string>()},
-                    {"serial", serial}};
-            map<string, string> headers;
-            string response;
-            auto retval = sendRequest(baseURL + "/validate/offlinerefill", parameters, headers, response);
+            pam_syslog(pamh, LOG_DEBUG, "%s", response.c_str());
+        }
+        if (retval != 0)
+        {
+            // TODO might be expected when the machine is offline, leave it at debug
             if (debug)
             {
-                pam_syslog(pamh, LOG_DEBUG, "%s", response.c_str());
+                pam_syslog(pamh, LOG_DEBUG, "%s", "Unable to refill offline values");
             }
-            if (retval != 0)
-            {
-                // TODO might be expected when the machine is offline, leave it at debug
-                if (debug)
-                {
-                    pam_syslog(pamh, LOG_DEBUG, "%s", "Unable to refill offline values");
-                }
-                break;
-            }
+            break;
+        }
 
-            json j;
-            try
-            {
-                j = json::parse(response);
-            }
-            catch (const json::parse_error &e)
-            {
-                pam_syslog(pamh, LOG_ERR, "Unable parse refill response!");
-                return 1;
-            }
+        json j;
+        try
+        {
+            j = json::parse(response);
+        }
+        catch (const json::parse_error &e)
+        {
+            pam_syslog(pamh, LOG_ERR, "Unable parse refill response!");
+            return 1;
+        }
 
-            if (j.contains("auth_items") && j["auth_items"].contains("offline") && j["auth_items"]["offline"].is_array() && j["auth_items"]["offline"].size() > 0 && j["auth_items"]["offline"][0].contains("refilltoken") && j["auth_items"]["offline"][0].contains("response"))
+        if (j.contains("auth_items") && j["auth_items"].contains("offline") && j["auth_items"]["offline"].is_array() && j["auth_items"]["offline"].size() > 0 && j["auth_items"]["offline"][0].contains("refilltoken") && j["auth_items"]["offline"][0].contains("response"))
+        {
+            item["refilltoken"] = j["auth_items"]["offline"][0]["refilltoken"];
+            item["response"].update(j["auth_items"]["offline"][0]["response"]);
+            if (debug)
             {
-                item["refilltoken"] = j["auth_items"]["offline"][0]["refilltoken"];
-                item["response"].update(j["auth_items"]["offline"][0]["response"]);
-                if (debug)
-                {
-                    pam_syslog(pamh, LOG_DEBUG, "Offline refill completed, added %zu new values.\n", j["auth_items"]["offline"][0]["response"].size());
-                }
+                pam_syslog(pamh, LOG_DEBUG, "Offline refill completed, added %zu new values.\n", j["auth_items"]["offline"][0]["response"].size());
             }
-            else
-            {
-                pam_syslog(pamh, LOG_ERR, "Unable to update offline data because refill response is malformed:\n%s", j.dump(4).c_str());
-            }
+        }
+        else
+        {
+            pam_syslog(pamh, LOG_ERR, "Unable to update offline data because refill response is malformed:\n%s", j.dump(4).c_str());
         }
     }
     return 0;
@@ -316,37 +340,6 @@ int PrivacyIDEA::validateCheckFIDO(const FIDOSignResponse &signResponse, const s
     int res = sendRequest(baseURL + "/validate/check", parameters, headers, strResponse);
 
     return parseResponse(strResponse, response);
-}
-
-std::string PrivacyIDEA::base64Encode(const unsigned char *data, size_t length)
-{
-    size_t encoded_len = 4 * ((length + 2) / 3);
-    std::string encoded_string(encoded_len, '\0');
-    int final_len = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&encoded_string[0]), data, length);
-    if (final_len < 0)
-    {
-        // Handle error, maybe log it
-        return "";
-    }
-    encoded_string.resize(final_len);
-    return encoded_string;
-}
-
-std::vector<unsigned char> PrivacyIDEA::base64Decode(const std::string &encoded_string)
-{
-    size_t decoded_len = (encoded_string.length() / 4) * 3; // Max possible length
-    std::vector<unsigned char> decoded_data(decoded_len);
-
-    int final_len = EVP_DecodeBlock(decoded_data.data(),
-                                    reinterpret_cast<const unsigned char *>(encoded_string.c_str()),
-                                    encoded_string.length());
-    if (final_len < 0)
-    {
-        // Handle error, maybe log it
-        return {};
-    }
-    decoded_data.resize(final_len);
-    return decoded_data;
 }
 
 std::string PrivacyIDEA::readAll(std::string file)
@@ -420,7 +413,7 @@ int PrivacyIDEA::parseResponse(const std::string &input, Response &out)
             if (passkey.contains("transaction_id"))
                 data.transaction_id = passkey["transaction_id"].get<std::string>();
             if (passkey.contains("user_verification"))
-                data.user_verification = passkey["user_verification"].get<std::string>();
+                data.userVerification = passkey["user_verification"].get<std::string>();
             out.signRequest = data;
         }
 
@@ -430,5 +423,81 @@ int PrivacyIDEA::parseResponse(const std::string &input, Response &out)
         }
     }
 
+    // After a successful online authentication, the server may send offline credentials
+    if (jResponse.contains("auth_items") && jResponse["auth_items"].is_object())
+    {
+        const auto& authItems = jResponse["auth_items"];
+        if (authItems.contains("offline") && authItems["offline"].is_array())
+        {
+            pam_syslog(pamh, LOG_DEBUG, "Found offline credentials in server response.");
+            for (const auto& offlineItem : authItems["offline"])
+            {
+                if (offlineItem.contains("response") && offlineItem["response"].is_object() &&
+                    offlineItem.contains("user") && offlineItem["user"].is_string() &&
+                    offlineItem.contains("serial") && offlineItem["serial"].is_string())
+                {
+                    const auto& offlineResponse = offlineItem["response"];
+                    if (offlineResponse.contains("pubKey") && offlineResponse.contains("credentialId"))
+                    {
+                        std::string user = offlineItem["user"].get<std::string>();
+                        std::string serial = offlineItem["serial"].get<std::string>();
+                        std::string pubKey = offlineResponse["pubKey"].get<std::string>();
+                        std::string credId = offlineResponse["credentialId"].get<std::string>();
+
+                        pam_syslog(pamh, LOG_INFO, "Storing offline credential for user '%s', serial '%s'.", user.c_str(), serial.c_str());
+
+                        // Find if a credential with this serial already exists and update it, otherwise add a new one.
+                        auto it = std::find_if(offlineData.begin(), offlineData.end(),
+                                               [&serial](const OfflineFIDOCredential& cred) { return cred.serial == serial; });
+
+                        if (it != offlineData.end()) {
+                            it->public_key_hex = pubKey;
+                            it->credId = credId;
+                            it->username = user;
+                            // Keep the signcount
+                        } else {
+                            offlineData.push_back({pubKey, user, "", credId, serial, 0});
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return 0;
+}
+
+OfflineFIDOCredential* PrivacyIDEA::findOfflineCredential(const std::string& serial)
+{
+    for (auto& cred : offlineData)
+    {
+        if (cred.serial == serial) {
+            return &cred;
+        }
+    }
+    return nullptr;
+}
+
+void PrivacyIDEA::updateSignCount(const std::string& serial, uint32_t newSignCount)
+{
+    OfflineFIDOCredential* cred = findOfflineCredential(serial);
+    if (cred) {
+        cred->sign_count = newSignCount;
+        pam_syslog(pamh, LOG_DEBUG, "Updated signature count for serial '%s' to %u.", serial.c_str(), newSignCount);
+    } else {
+        pam_syslog(pamh, LOG_ERR, "Could not update signature count: failed to find credential with serial '%s'.", serial.c_str());
+    }
+}
+
+std::vector<OfflineFIDOCredential> PrivacyIDEA::findOfflineCredentialsForUser(const std::string& username) const
+{
+    std::vector<OfflineFIDOCredential> userCredentials;
+    for (const auto& cred : offlineData)
+    {
+        if (cred.username == username)
+        {
+            userCredentials.push_back(cred);
+        }
+    }
+    return userCredentials;
 }

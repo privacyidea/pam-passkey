@@ -1,8 +1,10 @@
+#include <memory>
 #include "convert.h"
 
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/buffer.h>
+#include <openssl/rand.h>
 
 #include <stdexcept>
 #include <algorithm>
@@ -11,28 +13,19 @@
 
 std::vector<unsigned char> Convert::Base64Decode(const std::string& base64String)
 {
-    BIO* bio = BIO_new_mem_buf(base64String.c_str(), -1);
-    if (!bio)
+    size_t decoded_len = (base64String.length() / 4) * 3; // Max possible length
+    std::vector<unsigned char> decoded_data(decoded_len);
+
+    int final_len = EVP_DecodeBlock(decoded_data.data(),
+                                    reinterpret_cast<const unsigned char *>(base64String.c_str()),
+                                    base64String.length());
+    if (final_len < 0)
     {
-        throw std::runtime_error("Failed to create memory buffer for Base64 decoding");
+        // Handle error, maybe log it
+        return {};
     }
-
-    BIO* b64 = BIO_new(BIO_f_base64());
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-    bio = BIO_push(b64, bio);
-
-    std::vector<unsigned char> decodedData(base64String.length());
-    int decodedLength = BIO_read(bio, decodedData.data(), decodedData.size());
-
-    BIO_free_all(bio);
-
-    if (decodedLength < 0)
-    {
-        throw std::runtime_error("Failed to decode Base64 string");
-    }
-
-    decodedData.resize(decodedLength);
-    return decodedData;
+    decoded_data.resize(final_len);
+    return decoded_data;
 }
 
 std::vector<unsigned char> Convert::Base64URLDecode(const std::string& base64URLString)
@@ -52,27 +45,16 @@ std::vector<unsigned char> Convert::Base64URLDecode(const std::string& base64URL
 
 std::string Convert::Base64Encode(const unsigned char* data, const size_t size, bool padded)
 {
-    BIO* bio = BIO_new(BIO_s_mem());
-    BIO* b64 = BIO_new(BIO_f_base64());
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-    bio = BIO_push(b64, bio);
-
-    BIO_write(bio, data, size);
-    BIO_flush(bio);
-
-    BUF_MEM* bufferPtr;
-    BIO_get_mem_ptr(bio, &bufferPtr);
-
-    std::string encodedData(bufferPtr->data, bufferPtr->length);
-
-    BIO_free_all(bio);
-
-    if (!padded)
+    size_t encoded_len = 4 * ((size + 2) / 3);
+    std::string encoded_string(encoded_len, '\0');
+    int final_len = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&encoded_string[0]), data, size);
+    if (final_len < 0)
     {
-        encodedData.erase(std::remove(encodedData.begin(), encodedData.end(), '='), encodedData.end());
+        // Handle error, maybe log it
+        return "";
     }
-
-    return encodedData;
+    encoded_string.resize(final_len);
+    return encoded_string;
 }
 
 std::string Convert::Base64Encode(const std::vector<unsigned char>& data, bool padded)
@@ -92,6 +74,31 @@ std::string Convert::Base64URLEncode(const std::vector<unsigned char>& data, boo
     return Base64URLEncode(data.data(), data.size(), padded);
 }
 
+std::string Convert::UrlEncode(const std::string &input)
+{
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+
+    for (auto c : input)
+    {
+        // Keep alphanumeric and other accepted characters intact
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+        {
+            escaped << c;
+        }
+        // Any other characters are percent-encoded
+        else
+        {
+            escaped << std::uppercase;
+            escaped << '%' << std::setw(2) << int((unsigned char)c);
+            escaped << std::nouppercase;
+        }
+    }
+
+    return escaped.str();
+}
+
 void Convert::Base64ToBase64URL(std::string& base64)
 {
     std::replace(base64.begin(), base64.end(), '+', '-');
@@ -102,6 +109,17 @@ void Convert::Base64URLToBase64(std::string& base64URL)
 {
     std::replace(base64URL.begin(), base64URL.end(), '-', '+');
     std::replace(base64URL.begin(), base64URL.end(), '_', '/');
+}
+
+std::string Convert::GenerateRandomAsBase64URL(size_t size)
+{
+    std::vector<unsigned char> buffer(size);
+    if (RAND_bytes(buffer.data(), size) != 1)
+    {
+        // Error generating random bytes, OpenSSL error queue will have details.
+        return "";
+    }
+    return Base64URLEncode(buffer, false);
 }
 
 void Convert::Base64ToABase64(std::string& base64)

@@ -37,16 +37,23 @@ constexpr auto OFFLINE_CHALLENGE_SIZE = 64;
 class FIDODevice
 {
 public:
-	static std::vector<FIDODevice> getDevices(pam_handle_t* pamh, bool log = true);
+	static std::vector<FIDODevice> getDevices(pam_handle_t *pamh, bool log = true);
 
-	FIDODevice(pam_handle_t* pamh, const fido_dev_info_t *devinfo, bool log = true);
+	FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo, bool log = true);
 	FIDODevice() = default;
 
-	int Sign(
+	int sign(
 		const FIDOSignRequest &signRequest,
 		const std::string &origin,
 		const std::string &pin,
 		FIDOSignResponse &signResponse) const;
+
+	int signAndVerifyAssertion(
+		std::vector<OfflineFIDOCredential> &offlineData,
+		const std::string &origin,
+		const std::string &pin,
+		std::string &serialUsed,
+		uint32_t &newSignCount) const;
 
 	std::string getPath() const { return _path; }
 	std::string getManufacturer() const { return _manufacturer; }
@@ -59,7 +66,7 @@ public:
 	int getDetails();
 
 private:
-	pam_handle_t* _pamh = nullptr;
+	pam_handle_t *_pamh = nullptr;
 	std::string _path;
 	std::string _manufacturer;
 	std::string _product;
@@ -68,6 +75,18 @@ private:
 	std::vector<int> _supportedAlgorithms;
 	long _remainingResidentKeys = -1;
 	bool _newPinRequired = false;
+
+	int getAssert(
+		const FIDOSignRequest &signRequest,
+		const std::string &origin,
+		const std::string &pin,
+		fido_assert_t **assert,
+		std::vector<unsigned char> &clientDataOut) const;
+
+	int ecKeyFromCbor(
+		const std::string &cborPubKey,
+		EC_KEY **ecKey,
+		int *algorithm) const;
 };
 
 #endif // FIDO_DEVICE_H

@@ -2,6 +2,7 @@
 #define FIDO_SIGN_REQUEST_H
 
 #include <string>
+#include <vector>
 
 struct FIDOSignRequest
 {
@@ -9,7 +10,8 @@ struct FIDOSignRequest
 	std::string message;
 	std::string rpId;
 	std::string transaction_id;
-	std::string user_verification;
+	std::string userVerification;
+	std::vector<std::string> allowedCredentials;
 };
 
 #endif // FIDO_SIGN_REQUEST_H

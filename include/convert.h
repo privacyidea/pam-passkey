@@ -7,12 +7,14 @@
 class Convert
 {
 public:
-	static std::vector<unsigned char> Base64Decode(const std::string &base64String);
+	static std::vector<unsigned char> Base64Decode(const std::string& base64String);
 	static std::vector<unsigned char> Base64URLDecode(const std::string &base64String);
 	static std::string Base64Encode(const unsigned char *data, const size_t size, bool padded = false);
 	static std::string Base64Encode(const std::vector<unsigned char> &data, bool padded = false);
 	static std::string Base64URLEncode(const unsigned char *data, const size_t size, bool padded = false);
 	static std::string Base64URLEncode(const std::vector<unsigned char> &data, bool padded = false);
+	static std::string UrlEncode(const std::string &input);
+	static std::string GenerateRandomAsBase64URL(size_t size);
 
 	// replace '+' with '-' and '/' with '_'
 	static void Base64ToBase64URL(std::string &base64);

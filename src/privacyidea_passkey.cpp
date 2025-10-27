@@ -8,6 +8,7 @@
 #include <syslog.h>
 #include <fido.h>
 #include <unistd.h> // For geteuid
+#include <curl/curl.h> // For cURL error codes
 #include <chrono>
 #include <privacyidea.h>
 #include <config.h>
@@ -119,12 +120,69 @@ void getConfig(pam_handle_t *pamh, int argc, const char **argv, Config &config)
                 pam_syslog(pamh, LOG_ERR, "Invalid timeout value: '%s'. Using default. Error: %s", value.c_str(), e.what());
             }
         }
+        else if (key == "noPIN")
+        {
+            config.noPIN = true;
+            pam_syslog(pamh, LOG_DEBUG, "Setting noPIN=true (PIN will not be required for offline authentication)");
+        }
         else
         {
             pam_syslog(pamh, LOG_WARNING, "Unknown argument: %s", tmp.c_str());
         }
     }
 }
+
+static int getPinFromUser(pam_handle_t *pamh, const std::string &prompt, std::string &outPin)
+{
+    char *response_ptr = nullptr;
+    pam_syslog(pamh, LOG_DEBUG, "Requesting PIN from user...");
+    int prompt_ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response_ptr, prompt.c_str());
+
+    if (prompt_ret != PAM_SUCCESS || response_ptr == nullptr)
+    {
+        pam_syslog(pamh, LOG_ERR, "Failed to get PIN from user (prompt result: %d).", prompt_ret);
+        if (response_ptr)
+            free(response_ptr);
+        return PAM_AUTH_ERR;
+    }
+
+    outPin = response_ptr;
+
+    // Securely erase and free the memory that held the PIN
+    memset(response_ptr, 0, outPin.length());
+    free(response_ptr);
+
+    return PAM_SUCCESS;
+}
+
+static std::vector<FIDODevice> getDevicesWithWait(pam_handle_t *pamh, bool debug)
+{
+    auto devices = FIDODevice::getDevices(pamh, debug);
+
+    if (devices.empty())
+    {
+        pam_syslog(pamh, LOG_INFO, "No FIDO device found. Prompting user for insertion with a 30-second timeout.");
+        pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Please insert your security key.");
+
+        const auto timeout = std::chrono::seconds(30);
+        auto startTime = std::chrono::steady_clock::now();
+
+        while (std::chrono::steady_clock::now() - startTime < timeout)
+        {
+            // Don't spam the logs in the loop
+            devices = FIDODevice::getDevices(pamh, false);
+            if (!devices.empty())
+            {
+                pam_syslog(pamh, LOG_INFO, "FIDO device detected.");
+                break;
+            }
+            sleep(1); // Check once per second
+        }
+    }
+
+    return devices;
+}
+
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
@@ -167,43 +225,106 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     
     Response initializeResponse;
     int res = privacyidea.validateInitializePasskey(initializeResponse);
-    if (res != 0)
+
+    // Check if the online request failed.
+    if (res != CURLE_OK)
     {
-        pam_syslog(pamh, LOG_ERR, "Getting passkey challenge failed with error %d", res);
-        pam_syslog(pamh, LOG_DEBUG, "pam_sm_authenticate returns %s", pam_strerror(pamh, PAM_SERVICE_ERR));
-        return PAM_SERVICE_ERR;
+        // It failed. Now, determine if it was a network error that should trigger offline mode.
+        // A simple check for common network-related cURL errors.
+        bool isNetworkError = (res == CURLE_COULDNT_RESOLVE_HOST ||
+                               res == CURLE_COULDNT_CONNECT ||
+                               res == CURLE_OPERATION_TIMEDOUT ||
+                               res == CURLE_RECV_ERROR ||
+                               res == CURLE_SEND_ERROR);
+
+        if (isNetworkError)
+        {
+            pam_syslog(pamh, LOG_INFO, "Online authentication failed with network error %d. Attempting offline authentication.", res);
+
+            const char* pamUser = nullptr;
+            if (pam_get_user(pamh, &pamUser, nullptr) != PAM_SUCCESS || pamUser == nullptr)
+            {
+                pam_syslog(pamh, LOG_ERR, "Cannot perform offline authentication without a username.");
+                return PAM_USER_UNKNOWN;
+            }
+
+            auto offlineCredentials = privacyidea.findOfflineCredentialsForUser(pamUser);
+            if (offlineCredentials.empty())
+            {
+                pam_syslog(pamh, LOG_ERR, "No offline credentials found for user '%s'.", pamUser);
+                return PAM_AUTH_ERR;
+            }
+
+            // Set the rpId for all credentials for this user
+            for (auto& cred : offlineCredentials)
+            {
+                cred.rpId = config.rpid;
+            }
+
+            auto devices = getDevicesWithWait(pamh, config.debug);
+            if (devices.empty())
+            {
+                pam_syslog(pamh, LOG_ERR, "Timeout waiting for FIDO device insertion for offline authentication.");
+                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Timeout waiting for security key.");
+                return PAM_AUTH_ERR;
+            }
+
+            // For now, just use the first device found
+            auto& device = devices[0];
+            std::string serialUsed;
+            uint32_t newSignCount = 0;
+            std::string pin;
+
+            if (!config.noPIN)
+            {
+                if (getPinFromUser(pamh, "Enter security key PIN for offline use: ", pin) != PAM_SUCCESS)
+                {
+                    return PAM_AUTH_ERR;
+                }
+            }
+
+            pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Touch your security key for offline authentication.");
+            // The vector is passed by value, but the sign count is updated on the original object in PrivacyIDEA
+            res = device.signAndVerifyAssertion(offlineCredentials, "https://" + config.rpid, pin, serialUsed, newSignCount);
+
+            if (res == FIDO_OK)
+            {
+                privacyidea.updateSignCount(serialUsed, newSignCount);
+                pam_syslog(pamh, LOG_INFO, "Offline authentication successful for user '%s' with token '%s'.", pamUser, serialUsed.c_str());
+                pamRet = PAM_SUCCESS;
+            }
+            else
+            {
+                pam_syslog(pamh, LOG_ERR, "Offline authentication failed: %s (code: %d)", fido_strerr(res), res);
+                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Offline authentication failed: %s", fido_strerr(res));
+                pamRet = PAM_AUTH_ERR;
+            }
+        }
+        else
+        {
+            // The failure was not a network error (e.g., SSL error). Fail securely.
+            pam_syslog(pamh, LOG_ERR, "Online authentication failed with non-network error %d. Not attempting offline.", res);
+            pam_syslog(pamh, LOG_DEBUG, "pam_sm_authenticate returns %s", pam_strerror(pamh, PAM_SERVICE_ERR));
+            return PAM_SERVICE_ERR;
+        }
     }
     else if (initializeResponse.signRequest)
     {
 
-        // SECURITY: Verify that the RP ID from the server matches the one configured in the PAM module.
-        // This is the client-side check that prevents phishing/MitM attacks.
+        // Compare the RP ID from privacyIDEA with the one configured for this module
         if (initializeResponse.signRequest->rpId != config.rpid)
         {
-            pam_syslog(pamh, LOG_ERR, "RPID mismatch! Expected '%s' but server sent '%s'.", config.rpid.c_str(), initializeResponse.signRequest->rpId.c_str());
+            pam_syslog(pamh, LOG_ERR, "RP ID mismatch! Expected '%s' but server sent '%s'.", config.rpid.c_str(), initializeResponse.signRequest->rpId.c_str());
             pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Security error: Relying Party ID mismatch.");
             return PAM_SERVICE_ERR;
         }
 
-        auto start = std::chrono::high_resolution_clock::now();
-        auto devices = FIDODevice::getDevices(pamh, config.debug);
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        pam_syslog(pamh, LOG_DEBUG, "FIDODevice::GetDevices() took %ld ms.", duration.count());
-
+        auto devices = getDevicesWithWait(pamh, config.debug);
         if (devices.empty())
         {
-            pam_syslog(pamh, LOG_ERR, "No device, requesting device insertion from user");
-            pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Insert your security key!");
-            while (true)
-            {
-                devices = FIDODevice::getDevices(pamh, config.debug);
-                if (!devices.empty())
-                {
-                    break;
-                }
-                sleep(1);
-            }
+            pam_syslog(pamh, LOG_ERR, "Timeout waiting for FIDO device insertion.");
+            pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Timeout waiting for security key.");
+            return PAM_AUTH_ERR;
         }
 
         auto device = devices[0];
@@ -212,37 +333,18 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         auto signRequest = initializeResponse.signRequest.value();
         std::string pin;
 
-        if (signRequest.user_verification != "discouraged")
+        if (signRequest.userVerification != "discouraged")
         {
-            char *response_ptr = nullptr;
-            pam_syslog(pamh, LOG_DEBUG, "Requesting PIN...");
-            pamRet = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response_ptr, "Enter your security key PIN: ");
-
-            if (pamRet != PAM_SUCCESS || response_ptr == nullptr)
+            if (getPinFromUser(pamh, "Enter your security key PIN: ", pin) != PAM_SUCCESS)
             {
-                pam_syslog(pamh, LOG_ERR, "Failed to get PIN from user.");
-                if (response_ptr)
-                {
-                    // pam_prompt documentation says we must free the response
-                    memset(response_ptr, 0, pin.length());
-                    free(response_ptr);
-                }
-                pam_syslog(pamh, LOG_DEBUG, "pam_sm_authenticate returns %s", pam_strerror(pamh, PAM_AUTH_ERR));
                 return PAM_AUTH_ERR;
             }
-
-            pin = response_ptr;
-
-            // Securely erase and free the memory that held the PIN
-            memset(response_ptr, 0, pin.length());
-            free(response_ptr);
-            response_ptr = nullptr;
         }
 
         pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Touch your security key!");
-        FIDOSignResponse signResponse; // Initialize an empty response object
-        pam_syslog(pamh, LOG_DEBUG, "getting signature from authenticator...");
-        res = device.Sign(signRequest, config.url, pin, signResponse);
+        FIDOSignResponse signResponse;
+        pam_syslog(pamh, LOG_DEBUG, "Getting signature from authenticator...");
+        res = device.sign(signRequest, config.url, pin, signResponse);
         if (res != 0)
         {
             pam_syslog(pamh, LOG_ERR, "Signing failed with error %d", res);
