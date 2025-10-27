@@ -63,8 +63,6 @@ public:
 
 	std::string toString() const;
 
-	int getDetails();
-
 private:
 	pam_handle_t *_pamh = nullptr;
 	std::string _path;

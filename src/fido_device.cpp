@@ -30,120 +30,114 @@ struct FidoAssertDeleter
 };
 using unique_fido_assert_t = std::unique_ptr<fido_assert_t, FidoAssertDeleter>;
 
+
+struct ECKeyDeleter
+{
+	void operator()(EC_KEY *key) const
+	{
+		if (key)
+			EC_KEY_free(key);
+	}
+};
+using unique_ec_key_t = std::unique_ptr<EC_KEY, ECKeyDeleter>;
+
+struct Es256PkDeleter
+{
+	void operator()(es256_pk_t *pk) const
+	{
+		if (pk)
+			es256_pk_free(&pk);
+	}
+};
+using unique_es256_pk_t = std::unique_ptr<es256_pk_t, Es256PkDeleter>;
+
 	// Forward declarations for functions used in this file
 	constexpr auto cosePubKeyAlg = 3;
 	constexpr auto cosePubKeyX = -2;
-	constexpr auto cosePubKeyY = -3;
-	constexpr auto cosePubKeyE = -2;
-	constexpr auto cosePubKeyN = -1;
-
+	constexpr auto cosePubKeyY = -3; // Still useful for logging if needed
 	int FIDODevice::ecKeyFromCbor(
 		const std::string &cborPubKey,
 		EC_KEY **ecKey,
 		int *algorithm) const
 	{
-		int res = FIDO_OK;
-		std::vector<unsigned char> pubKeyBytes;
-		if (cborPubKey.length() % 2 == 0)
-		{
-			// hex encoded
-			pubKeyBytes = Convert::HexToBytes(cborPubKey);
-		}
-		else
-		{
-			pubKeyBytes = Convert::Base64URLDecode(cborPubKey);
-		}
+    int res = FIDO_OK;
+    std::vector<unsigned char> pubKeyBytes;
+    if (cborPubKey.length() % 2 == 0)
+    {
+        // hex encoded
+        pubKeyBytes = Convert::HexToBytes(cborPubKey);
+    }
+    else
+    {
+        pubKeyBytes = Convert::Base64URLDecode(cborPubKey);
+    }
 
-		struct cbor_load_result result;
-		cbor_item_t *map = cbor_load(pubKeyBytes.data(), pubKeyBytes.size(), &result);
+    struct cbor_load_result result;
+    cbor_item_t *map = cbor_load(pubKeyBytes.data(), pubKeyBytes.size(), &result);
 
-		if (map == NULL)
-		{
-			pam_syslog(_pamh, LOG_ERR, "Failed to parse CBOR public key");
-			return FIDO_ERR_INVALID_ARGUMENT;
-		}
-		if (!cbor_isa_map(map))
-		{
-			pam_syslog(_pamh, LOG_ERR, "CBOR public key is not a map");
-			cbor_decref(&map);
-			return FIDO_ERR_INVALID_ARGUMENT;
-		}
+    if (map == NULL)
+    {
+        pam_syslog(_pamh, LOG_ERR, "Failed to parse CBOR public key");
+        return FIDO_ERR_INVALID_ARGUMENT;
+    }
+    if (!cbor_isa_map(map))
+    {
+        pam_syslog(_pamh, LOG_ERR, "CBOR public key is not a map");
+        cbor_decref(&map);
+        return FIDO_ERR_INVALID_ARGUMENT;
+    }
 
-		size_t size = cbor_map_size(map);
-		cbor_pair *pairs = cbor_map_handle(map);
-		// cbor_map
-		//  Find the algorithm
-		int alg = 0;
-		for (int i = 0; i < size; i++)
-		{
-			if (cbor_isa_uint(pairs[i].key) && cbor_get_uint8(pairs[i].key) == cosePubKeyAlg)
-			{
-				if (cbor_isa_negint(pairs[i].value))
-				{
-					alg = -1 - cbor_get_int(pairs[i].value);
-				}
-			}
-		}
+    size_t size = cbor_map_size(map);
+    cbor_pair *pairs = cbor_map_handle(map);
+    int alg = 0;
+    for (size_t i = 0; i < size; i++)
+    {
+        if (cbor_isa_uint(pairs[i].key) && cbor_get_uint8(pairs[i].key) == cosePubKeyAlg)
+        {
+            if (cbor_isa_negint(pairs[i].value))
+            {
+                alg = -1 - cbor_get_int(pairs[i].value);
+            }
+        }
+    }
 
-		// Depending on the algorithm, find the values to build the public key
-		if (alg == COSE_ES256)
-		{
-			*algorithm = alg;
-			std::vector<uint8_t> x, y;
-			for (int i = 0; i < size; i++)
-			{
-				if (cbor_isa_negint(pairs[i].key))
-				{
-					int key = -1 - cbor_get_int(pairs[i].key);
-					if (key == cosePubKeyX)
-					{
-						if (cbor_isa_bytestring(pairs[i].value))
-						{
-							x = std::vector<uint8_t>(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
-						}
-					}
-					else if (key == cosePubKeyY)
-					{
-						if (cbor_isa_bytestring(pairs[i].value))
-						{
-							y = std::vector<uint8_t>(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
-						}
-					}
-				}
-			}
+    if (alg == COSE_ES256)
+    {
+        *algorithm = alg;
+        std::vector<uint8_t> x, y;
+        for (size_t i = 0; i < size; i++)
+        {
+            if (cbor_isa_negint(pairs[i].key))
+            {
+                int key = -1 - cbor_get_int(pairs[i].key);
+                if (key == cosePubKeyX && cbor_isa_bytestring(pairs[i].value))
+                {
+                    x.assign(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
+                }
+                else if (key == cosePubKeyY && cbor_isa_bytestring(pairs[i].value))
+                {
+                    y.assign(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
+                }
+            }
+        }
 
-			if (x.size() != 32)
-			{
-				pam_syslog(_pamh, LOG_ERR, "cosePubKeyX has the wrong size. Expected 32, actual: %zu", x.size());
-				cbor_decref(&map);
-				return FIDO_ERR_INVALID_ARGUMENT;
-			}
-			if (y.size() != 32)
-			{
-				pam_syslog(_pamh, LOG_ERR, "cosePubKeyY has the wrong size. Expected 32, actual: %zu", y.size());
-				cbor_decref(&map);
-				return FIDO_ERR_INVALID_ARGUMENT;
-			}
+        *ecKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+        BIGNUM *bnx = BN_new();
+        BN_bin2bn(x.data(), x.size(), bnx);
+        BIGNUM *bny = BN_new();
+        BN_bin2bn(y.data(), y.size(), bny);
+        EC_KEY_set_public_key_affine_coordinates(*ecKey, bnx, bny);
+        BN_free(bnx);
+        BN_free(bny);
+    }
+    else
+    {
+        pam_syslog(_pamh, LOG_ERR, "Unimplemented alg: %d", alg);
+        res = FIDO_ERR_INVALID_ARGUMENT;
+    }
 
-			// secp256r1 is called prime256v1 in OpenSSL (RFC 5480, Section 2.1.1.1)
-			*ecKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-			BIGNUM *bnx = BN_new();
-			BN_bin2bn(x.data(), x.size(), bnx);
-			BIGNUM *bny = BN_new();
-			BN_bin2bn(y.data(), y.size(), bny);
-			EC_KEY_set_public_key_affine_coordinates(*ecKey, bnx, bny);
-			BN_free(bnx);
-			BN_free(bny);
-		}
-		else
-		{
-			// TODO implement other COSE algorithms if supported by privacyIDEA
-			pam_syslog(_pamh, LOG_ERR, "Unimplemented alg: %d", alg);
-			res = FIDO_ERR_INVALID_ARGUMENT;
-		}
-
-		cbor_decref(&map);
-		return res;
+    cbor_decref(&map);
+    return res;
 	}
 
 	static unique_fido_dev_t OpenFidoDevice(pam_handle_t* pamh, const std::string &devicePath, int &outError)
@@ -234,19 +228,20 @@ int FIDODevice::signAndVerifyAssertion(
 		}
 	}
 
-	fido_assert_t* assert = nullptr;
+	fido_assert_t* assert_raw = nullptr;
 	std::vector<unsigned char> cDataBytes;
-	int res = getAssert(signRequest, origin, pin, &assert, cDataBytes);
+	int res = getAssert(signRequest, origin, pin, &assert_raw, cDataBytes); // The raw pointer is still named assert_raw here
+	unique_fido_assert_t fido_assertion(assert_raw);
 
-	EC_KEY* ecKey = nullptr;
-	es256_pk_t* pk = es256_pk_new();
+	unique_ec_key_t ecKey(nullptr);
+	unique_es256_pk_t pk(es256_pk_new());
 	int algorithm = 0;
 
 	if (res == FIDO_OK)
 	{
 		// Find the credential which signed the assert and use it's public key to verify the signature
-		auto pbId = fido_assert_id_ptr(assert, 0);
-		auto cbId = fido_assert_id_len(assert, 0);
+		auto pbId = fido_assert_id_ptr(fido_assertion.get(), 0);
+		auto cbId = fido_assert_id_len(fido_assertion.get(), 0);
 		auto idUsed = Convert::Base64URLEncode(pbId, cbId);
 		
 		OfflineFIDOCredential* credUsed = nullptr;
@@ -266,8 +261,10 @@ int FIDODevice::signAndVerifyAssertion(
 			return FIDO_ERR_INVALID_ARGUMENT;
 		}
 
-		res = ecKeyFromCbor(credUsed->public_key_hex, &ecKey, &algorithm);
-		if (ecKey == nullptr)
+		EC_KEY* ecKey_raw = nullptr;
+		res = ecKeyFromCbor(credUsed->public_key_hex, &ecKey_raw, &algorithm); // This now returns a raw pointer
+		ecKey.reset(ecKey_raw); // The unique_ptr takes ownership
+		if (!ecKey) // Check the unique_ptr
 		{
 			pam_syslog(_pamh, LOG_ERR, "Failed to create EC_KEY from public key CBOR.");
 			return FIDO_ERR_INTERNAL;
@@ -280,13 +277,13 @@ int FIDODevice::signAndVerifyAssertion(
 			return FIDO_ERR_UNSUPPORTED_OPTION;
 		}
 
-		res = es256_pk_from_EC_KEY(pk, ecKey);
+		res = es256_pk_from_EC_KEY(pk.get(), ecKey.get());
 		if (res == FIDO_OK)
 		{
-			res = fido_assert_verify(assert, 0, algorithm, pk);
+			res = fido_assert_verify(fido_assertion.get(), 0, algorithm, pk.get());
 			if (res == FIDO_OK)
 			{
-				uint32_t new_sigcount = fido_assert_sigcount(assert, 0);
+				uint32_t new_sigcount = fido_assert_sigcount(fido_assertion.get(), 0);
 				if (new_sigcount > credUsed->sign_count)
 				{
 					pam_syslog(_pamh, LOG_DEBUG, "Offline assertion verified successfully! New signature count: %u (was %u)", new_sigcount, credUsed->sign_count);
@@ -313,19 +310,6 @@ int FIDODevice::signAndVerifyAssertion(
 		pam_syslog(_pamh, LOG_ERR, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
 	}
 
-	if (pk)
-	{
-		es256_pk_free(&pk);
-	}
-	if (ecKey)
-	{
-		EC_KEY_free(ecKey);
-	}
-	if (assert)
-	{
-		fido_assert_free(&assert);
-	}
-
 	return res;
 }
 
@@ -335,13 +319,47 @@ FIDODevice::FIDODevice(pam_handle_t* pamh, const fido_dev_info_t *devinfo, bool 
 																   _manufacturer(fido_dev_info_manufacturer_string(devinfo)),
 																   _product(fido_dev_info_product_string(devinfo))
 {
-	unique_fido_dev_t dev(fido_dev_new_with_info(devinfo));
-	if (dev != NULL)
+	int res = FIDO_OK;
+	unique_fido_dev_t dev = OpenFidoDevice(_pamh, _path, res);
+	if (dev == nullptr)
 	{
-		_hasPin = fido_dev_has_pin(dev.get());
-		_hasUV = fido_dev_has_uv(dev.get());
-		if (log) pam_syslog(pamh, LOG_DEBUG, "New FIDO device: %s hasPin: %d", toString().c_str(), _hasPin);
+		pam_syslog(_pamh, LOG_ERR, "Failed to open device %s in constructor", _path.c_str());
+		// The object will be created but in a non-functional state.
+		return;
 	}
+
+	_hasPin = fido_dev_has_pin(dev.get());
+	_hasUV = fido_dev_has_uv(dev.get());
+	if (log) pam_syslog(_pamh, LOG_DEBUG, "New FIDO device: %s hasPin: %d, hasUV: %d", toString().c_str(), _hasPin, _hasUV);
+
+	// Get detailed CBOR info
+	fido_cbor_info_t *info = fido_cbor_info_new();
+	if (info == nullptr)
+	{
+		pam_syslog(_pamh, LOG_ERR, "fido_cbor_info_new failed.");
+		return;
+	}
+
+	res = fido_dev_get_cbor_info(dev.get(), info);
+	if (res == FIDO_OK)
+	{
+		// Algorithms
+		size_t nalg = fido_cbor_info_algorithm_count(info);
+		for (size_t i = 0; i < nalg; i++)
+		{
+			_supportedAlgorithms.push_back(fido_cbor_info_algorithm_cose(info, i));
+		}
+		// Remaining Resident Keys
+		_remainingResidentKeys = fido_cbor_info_rk_remaining(info);
+		// New PIN required
+		_newPinRequired = fido_cbor_info_new_pin_required(info);
+	}
+	else
+	{
+		pam_syslog(_pamh, LOG_DEBUG, "fido_dev_get_cbor_info: %s (code: %d). Device may be U2F-only.", fido_strerr(res), res);
+	}
+
+	fido_cbor_info_free(&info);
 }
 
 std::string FIDODevice::toString() const
@@ -355,37 +373,34 @@ int FIDODevice::sign(
 	const std::string &pin,
 	FIDOSignResponse &signResponse) const
 {
-	fido_assert_t *assert = nullptr;
+	fido_assert_t *assert_raw = nullptr;
 	std::vector<unsigned char> vecClientData;
-	int res = getAssert(signRequest, origin, pin, &assert, vecClientData);
+	int res = getAssert(signRequest, origin, pin, &assert_raw, vecClientData); // The raw pointer is still named assert_raw here
+	unique_fido_assert_t fido_assertion(assert_raw);
 
 	if (res != FIDO_OK)
 	{
 		pam_syslog(_pamh, LOG_DEBUG, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
+		return res;
 	}
 
-	if (res == FIDO_OK)
-	{
-		signResponse.clientdata = Convert::Base64URLEncode(vecClientData);
+	signResponse.clientdata = Convert::Base64URLEncode(vecClientData);
 
-		auto pbId = fido_assert_id_ptr(assert, 0);
-		auto cbId = fido_assert_id_len(assert, 0);
-		signResponse.credentialid = Convert::Base64URLEncode(pbId, cbId);
+	auto pbId = fido_assert_id_ptr(fido_assertion.get(), 0);
+	auto cbId = fido_assert_id_len(fido_assertion.get(), 0);
+	signResponse.credentialid = Convert::Base64URLEncode(pbId, cbId);
 
-		auto pbAuthData = fido_assert_authdata_raw_ptr(assert, 0);
-		auto cbAuthData = fido_assert_authdata_raw_len(assert, 0);
-		signResponse.authenticatordata = Convert::Base64URLEncode(pbAuthData, cbAuthData);
+	auto pbAuthData = fido_assert_authdata_raw_ptr(fido_assertion.get(), 0);
+	auto cbAuthData = fido_assert_authdata_raw_len(fido_assertion.get(), 0);
+	signResponse.authenticatordata = Convert::Base64URLEncode(pbAuthData, cbAuthData);
 
-		auto pbSig = fido_assert_sig_ptr(assert, 0);
-		auto cbSig = fido_assert_sig_len(assert, 0);
-		signResponse.signaturedata = Convert::Base64URLEncode(pbSig, cbSig);
+	auto pbSig = fido_assert_sig_ptr(fido_assertion.get(), 0);
+	auto cbSig = fido_assert_sig_len(fido_assertion.get(), 0);
+	signResponse.signaturedata = Convert::Base64URLEncode(pbSig, cbSig);
 
-		auto pbUserHandle = fido_assert_user_id_ptr(assert, 0);
-		auto cbUserHandle = fido_assert_user_id_len(assert, 0);
-		signResponse.userHandle = Convert::Base64URLEncode(pbUserHandle, cbUserHandle);
-	}
-
-	fido_assert_free(&assert);
+	auto pbUserHandle = fido_assert_user_id_ptr(fido_assertion.get(), 0);
+	auto cbUserHandle = fido_assert_user_id_len(fido_assertion.get(), 0);
+	signResponse.userHandle = Convert::Base64URLEncode(pbUserHandle, cbUserHandle);
 
 	return res;
 }
@@ -398,10 +413,9 @@ int FIDODevice::getAssert(
 	std::vector<unsigned char>& clientDataOut) const
 {
 	int res = FIDO_OK;
-	pam_syslog(_pamh, LOG_ERR, "getAssert: OpenFidoDevice");
+	pam_syslog(_pamh, LOG_DEBUG, "getAssert: Opening FIDO device at %s", _path.c_str());
 	auto dev = OpenFidoDevice(_pamh, _path, res);
-	pam_syslog(_pamh, LOG_ERR, "getAssert: device opened");
-
+	
 	if (res != FIDO_OK)
 	{
 		pam_syslog(_pamh, LOG_ERR, "getAssert: OpenFidoDevice failed with error %d", res);
@@ -419,16 +433,13 @@ int FIDODevice::getAssert(
 	std::string challenge = signRequest.challenge;
 	std::vector<unsigned char> bytes(signRequest.challenge.begin(), signRequest.challenge.end());
 	challenge = Convert::Base64URLEncode(bytes.data(), bytes.size());
-	pam_syslog(_pamh, LOG_ERR, "challenge encoded: %s", challenge.c_str());
 	std::string cData = "{\"type\": \"webauthn.get\", \"challenge\": \"" + challenge + "\", \"origin\": \"" + origin + "\", \"crossOrigin\": false}";
 	clientDataOut = std::vector<unsigned char>(cData.begin(), cData.end());
-	pam_syslog(_pamh, LOG_ERR, "getAssert: clientdataout set");
 	res = fido_assert_set_clientdata(*assert, clientDataOut.data(), clientDataOut.size());
 	if (res != FIDO_OK)
 	{
 		pam_syslog(_pamh, LOG_DEBUG, "fido_assert_set_clientdata: %s (code: %d)", fido_strerr(res), res);
 	}
-	pam_syslog(_pamh, LOG_ERR, "getAssert: client data set");
 	// RP
 	res = fido_assert_set_rp(*assert, signRequest.rpId.c_str());
 	if (res != FIDO_OK)
@@ -454,69 +465,4 @@ int FIDODevice::getAssert(
 	}
 	// Get assert and close
 	return fido_dev_get_assert(dev.get(), *assert, pin.empty() ? NULL : pin.c_str());
-}
-
-int FIDODevice::getDetails()
-{
-	if (_path.empty())
-	{
-		pam_syslog(_pamh, LOG_ERR, "No device path provided");
-		return FIDO_ERR_INVALID_ARGUMENT;
-	}
-
-	int res = FIDO_OK;
-	unique_fido_dev_t dev(fido_dev_new());
-	if (dev == nullptr)
-	{
-		pam_syslog(_pamh, LOG_ERR, "fido_dev_new failed.");
-		return FIDO_ERR_INTERNAL;
-	}
-
-	res = fido_dev_open(dev.get(), _path.c_str());
-	if (res != FIDO_OK)
-	{
-		pam_syslog(_pamh, LOG_ERR, "fido_dev_open: %s (code: %d)", fido_strerr(res), res);
-		return FIDO_ERR_INTERNAL;
-	}
-
-	// Get info
-	fido_cbor_info_t *info = fido_cbor_info_new();
-	if (info == nullptr)
-	{
-		pam_syslog(_pamh, LOG_ERR, "Unable to allocate memory for fido_cbor_info_t!");
-		res = FIDO_ERR_INTERNAL;
-	}
-	// This call may block
-	res = fido_dev_get_cbor_info(dev.get(), info);
-	if (res != FIDO_OK)
-	{
-		pam_syslog(_pamh, LOG_ERR, "fido_dev_get_cbor_info: %s (code: %d)", fido_strerr(res), res);
-		res = FIDO_ERR_INTERNAL;
-	}
-
-	if (res == FIDO_OK)
-	{
-		// Algorithms
-		size_t nalg = fido_cbor_info_algorithm_count(info);
-		for (size_t i = 0; i < nalg; i++)
-		{
-			auto alg = fido_cbor_info_algorithm_cose(info, i);
-			_supportedAlgorithms.push_back(alg);
-		}
-		// Remaining Resident Keys
-		auto remainingResidentKeys = fido_cbor_info_rk_remaining(info);
-		if (remainingResidentKeys == -1)
-		{
-			pam_syslog(_pamh, LOG_DEBUG, "Authenticator can not report remaining resident keys");
-		}
-		else
-		{
-			_remainingResidentKeys = remainingResidentKeys;
-		}
-		// New PIN required
-		_newPinRequired = fido_cbor_info_new_pin_required(info);
-	}
-
-	fido_cbor_info_free(&info);
-	return 0;
 }

@@ -467,7 +467,7 @@ int PrivacyIDEA::parseResponse(const std::string &input, Response &out)
     return 0;
 }
 
-OfflineFIDOCredential* PrivacyIDEA::findOfflineCredential(const std::string& serial)
+OfflineFIDOCredential* PrivacyIDEA::_getMutableOfflineCredential(const std::string& serial)
 {
     for (auto& cred : offlineData)
     {
@@ -480,7 +480,7 @@ OfflineFIDOCredential* PrivacyIDEA::findOfflineCredential(const std::string& ser
 
 void PrivacyIDEA::updateSignCount(const std::string& serial, uint32_t newSignCount)
 {
-    OfflineFIDOCredential* cred = findOfflineCredential(serial);
+    OfflineFIDOCredential* cred = _getMutableOfflineCredential(serial);
     if (cred) {
         cred->sign_count = newSignCount;
         pam_syslog(pamh, LOG_DEBUG, "Updated signature count for serial '%s' to %u.", serial.c_str(), newSignCount);
@@ -500,4 +500,20 @@ std::vector<OfflineFIDOCredential> PrivacyIDEA::findOfflineCredentialsForUser(co
         }
     }
     return userCredentials;
+}
+
+std::optional<OfflineFIDOCredential> PrivacyIDEA::findOfflineCredential(const std::string& serial) const
+{
+    for (const auto& cred : offlineData)
+    {
+        if (cred.serial == serial) {
+            return cred; // Return a copy wrapped in optional
+        }
+    }
+    return std::nullopt; // Not found
+}
+
+std::vector<OfflineFIDOCredential> PrivacyIDEA::getAllOfflineCredentials() const
+{
+    return offlineData;
 }

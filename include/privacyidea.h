@@ -43,6 +43,10 @@ public:
 
     std::vector<OfflineFIDOCredential> findOfflineCredentialsForUser(const std::string &username) const;
 
+    std::optional<OfflineFIDOCredential> findOfflineCredential(const std::string& serial) const;
+
+    std::vector<OfflineFIDOCredential> getAllOfflineCredentials() const;
+
     void updateSignCount(const std::string& serial, uint32_t newSignCount);
 
 private:
@@ -59,8 +63,8 @@ private:
     std::vector<OfflineFIDOCredential> offlineData;
 
     std::string readAll(std::string file);
-
-    OfflineFIDOCredential* findOfflineCredential(const std::string& serial);
+    // Internal helper to get a mutable pointer for updates
+    OfflineFIDOCredential* _getMutableOfflineCredential(const std::string& serial);
 
     void writeAll(std::string file, std::string content);
 };

@@ -135,8 +135,8 @@ void getConfig(pam_handle_t *pamh, int argc, const char **argv, Config &config)
 static int getPinFromUser(pam_handle_t *pamh, const std::string &prompt, std::string &outPin)
 {
     char *response_ptr = nullptr;
-    pam_syslog(pamh, LOG_DEBUG, "Requesting PIN from user...");
-    int prompt_ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response_ptr, prompt.c_str());
+    pam_syslog(pamh, LOG_DEBUG, "Requesting PIN from user with prompt: %s", prompt.c_str());
+    int prompt_ret = pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &response_ptr, "%s", prompt.c_str());
 
     if (prompt_ret != PAM_SUCCESS || response_ptr == nullptr)
     {
@@ -241,36 +241,45 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         {
             pam_syslog(pamh, LOG_INFO, "Online authentication failed with network error %d. Attempting offline authentication.", res);
 
-            const char* pamUser = nullptr;
-            if (pam_get_user(pamh, &pamUser, nullptr) != PAM_SUCCESS || pamUser == nullptr)
-            {
-                pam_syslog(pamh, LOG_ERR, "Cannot perform offline authentication without a username.");
-                return PAM_USER_UNKNOWN;
-            }
+        const char* pamUser = nullptr;
+        pam_get_user(pamh, &pamUser, nullptr); // It's okay if this fails or returns null for usernameless
 
-            auto offlineCredentials = privacyidea.findOfflineCredentialsForUser(pamUser);
-            if (offlineCredentials.empty())
+        std::vector<OfflineFIDOCredential> credentialsToTry;
+        bool usernamelessAttempt = false;
+
+        if (pamUser == nullptr) {
+            pam_syslog(pamh, LOG_INFO, "No PAM user provided. Attempting usernameless offline authentication using all available offline credentials.");
+            credentialsToTry = privacyidea.getAllOfflineCredentials(); // Get all credentials
+            usernamelessAttempt = true;
+        } else {
+            pam_syslog(pamh, LOG_INFO, "PAM user '%s' provided. Attempting offline authentication for this user.", pamUser);
+            credentialsToTry = privacyidea.findOfflineCredentialsForUser(pamUser);
+        }
+
+            if (credentialsToTry.empty())
             {
-                pam_syslog(pamh, LOG_ERR, "No offline credentials found for user '%s'.", pamUser);
+                pam_syslog(pamh, LOG_ERR, "No offline credentials found for %s.", (pamUser ? pamUser : "any user"));
                 return PAM_AUTH_ERR;
             }
 
-            // Set the rpId for all credentials for this user
-            for (auto& cred : offlineCredentials)
-            {
-                cred.rpId = config.rpid;
-            }
+            // Set the rpId for all credentials for this user/usernameless attempt
+        for (auto& cred : credentialsToTry)
+        {
+            cred.rpId = config.rpid;
+        }
 
-            auto devices = getDevicesWithWait(pamh, config.debug);
-            if (devices.empty())
-            {
-                pam_syslog(pamh, LOG_ERR, "Timeout waiting for FIDO device insertion for offline authentication.");
-                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Timeout waiting for security key.");
-                return PAM_AUTH_ERR;
-            }
+        auto devices = getDevicesWithWait(pamh, config.debug);
+        if (devices.empty())
+        {
+            pam_syslog(pamh, LOG_ERR, "Timeout waiting for FIDO device insertion for offline authentication.");
+            pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Timeout waiting for security key.");
+            return PAM_AUTH_ERR;
+        }
 
-            // For now, just use the first device found
-            auto& device = devices[0];
+            // Loop through all found devices and try to authenticate
+            for (auto& device : devices)
+        {
+            pam_syslog(pamh, LOG_DEBUG, "Attempting offline authentication with device: %s", device.toString().c_str());
             std::string serialUsed;
             uint32_t newSignCount = 0;
             std::string pin;
@@ -279,33 +288,59 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
             {
                 if (getPinFromUser(pamh, "Enter security key PIN for offline use: ", pin) != PAM_SUCCESS)
                 {
+                    // If user cancels PIN entry, stop the whole process.
                     return PAM_AUTH_ERR;
                 }
             }
 
             pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Touch your security key for offline authentication.");
-            // The vector is passed by value, but the sign count is updated on the original object in PrivacyIDEA
-            res = device.signAndVerifyAssertion(offlineCredentials, "https://" + config.rpid, pin, serialUsed, newSignCount);
+                res = device.signAndVerifyAssertion(credentialsToTry, "https://" + config.rpid, pin, serialUsed, newSignCount);
 
             if (res == FIDO_OK)
             {
-                privacyidea.updateSignCount(serialUsed, newSignCount);
-                pam_syslog(pamh, LOG_INFO, "Offline authentication successful for user '%s' with token '%s'.", pamUser, serialUsed.c_str());
+                    privacyidea.updateSignCount(serialUsed, newSignCount);
+                pam_syslog(pamh, LOG_INFO, "Offline authentication successful for user '%s' with token '%s'.", pamUser ? pamUser : "UNKNOWN", serialUsed.c_str());
                 pamRet = PAM_SUCCESS;
+
+                if (usernamelessAttempt) {
+                    // If we started usernameless, find the username from the credential used
+                    if (auto usedCred = privacyidea.findOfflineCredential(serialUsed)) {
+                        // Dereference the optional to get the OfflineFIDOCredential object
+                        pam_syslog(pamh, LOG_INFO, "User identified as '%s' via credential '%s'.", usedCred->username.c_str(), serialUsed.c_str());
+                        pam_set_item(pamh, PAM_USER, usedCred->username.c_str());
+                    } else {
+                        pam_syslog(pamh, LOG_ERR, "Internal error: Authenticated credential with serial '%s' not found in offline data.", serialUsed.c_str());
+                        // This should ideally not happen if updateSignCount succeeded.
+                    }
+                }
+                break; // Success, exit the device loop
             }
-            else
+            else if (res == FIDO_ERR_NO_CREDENTIALS) {
+                pam_syslog(pamh, LOG_DEBUG, "No matching credentials found on device %s, trying next.", device.toString().c_str());
+                // Continue to the next device in the loop
+                } else {
+                // Other unrecoverable error, break and report failure
+                pam_syslog(pamh, LOG_ERR, "Offline authentication failed on device %s with unrecoverable error: %s (code: %d)", device.toString().c_str(), fido_strerr(res), res);
+                pamRet = PAM_AUTH_ERR; // Set pamRet to indicate failure
+                break;
+            }
+            }
+
+            // After the loop, if pamRet is not PAM_SUCCESS, it means all devices failed or an unrecoverable error occurred.
+            if (pamRet != PAM_SUCCESS)
             {
-                pam_syslog(pamh, LOG_ERR, "Offline authentication failed: %s (code: %d)", fido_strerr(res), res);
-                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Offline authentication failed: %s", fido_strerr(res));
+                // If the last error was NO_CREDENTIALS, it means no device had the right key.
+                if (res == FIDO_ERR_NO_CREDENTIALS) {
+                    pam_syslog(pamh, LOG_ERR, "No security key with matching credentials found after trying all devices.");
+                    pam_prompt(pamh, PAM_ERROR_MSG, NULL, "No security key with matching credentials found.");
+                } else if (pamRet == PAM_AUTH_ERR) { // For other specific errors, the message was already set.
+                    // The specific error message was already logged and prompted inside the loop.
+                } else { // Fallback for any other unhandled case
+                    pam_syslog(pamh, LOG_ERR, "Offline authentication failed for an unknown reason.");
+                    pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Offline authentication failed.");
+                }
                 pamRet = PAM_AUTH_ERR;
             }
-        }
-        else
-        {
-            // The failure was not a network error (e.g., SSL error). Fail securely.
-            pam_syslog(pamh, LOG_ERR, "Online authentication failed with non-network error %d. Not attempting offline.", res);
-            pam_syslog(pamh, LOG_DEBUG, "pam_sm_authenticate returns %s", pam_strerror(pamh, PAM_SERVICE_ERR));
-            return PAM_SERVICE_ERR;
         }
     }
     else if (initializeResponse.signRequest)
@@ -327,77 +362,75 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
             return PAM_AUTH_ERR;
         }
 
-        auto device = devices[0];
-        //device.GetDetails(); // Populate device info for the selected device
-        pam_syslog(pamh, LOG_ERR, "Using device: %s", device.toString().c_str());
-        auto signRequest = initializeResponse.signRequest.value();
-        std::string pin;
+        // Loop through all found devices and try to authenticate
+        for (auto& device : devices)
+        {
+            pam_syslog(pamh, LOG_DEBUG, "Attempting online authentication with device: %s", device.toString().c_str());
+            auto signRequest = initializeResponse.signRequest.value();
+            std::string pin;
 
-        if (signRequest.userVerification != "discouraged")
-        {
-            if (getPinFromUser(pamh, "Enter your security key PIN: ", pin) != PAM_SUCCESS)
+            if (signRequest.userVerification != "discouraged")
             {
-                return PAM_AUTH_ERR;
+                if (getPinFromUser(pamh, "Enter your security key PIN: ", pin) != PAM_SUCCESS)
+                {
+                    return PAM_AUTH_ERR;
+                }
             }
-        }
 
-        pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Touch your security key!");
-        FIDOSignResponse signResponse;
-        pam_syslog(pamh, LOG_DEBUG, "Getting signature from authenticator...");
-        res = device.sign(signRequest, config.url, pin, signResponse);
-        if (res != 0)
-        {
-            pam_syslog(pamh, LOG_ERR, "Signing failed with error %d", res);
-            pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Signing failed: %s", fido_strerr(res));
-            pamRet = PAM_AUTH_ERR;
-        }
-        else
-        {
-            Response response;
-            res = privacyidea.validateCheckFIDO(signResponse, signRequest.transaction_id, config.url, response);
-            if (res != 0)
+            pam_prompt(pamh, PAM_TEXT_INFO, NULL, "Touch your security key!");
+            FIDOSignResponse signResponse;
+            res = device.sign(signRequest, config.url, pin, signResponse);
+
+            if (res == FIDO_OK)
             {
-                pam_syslog(pamh, LOG_ERR, "Checking failed with error %d", res);
-                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Failed to communicate with privacyIDEA server.");
-                pamRet = PAM_AUTH_ERR;
-            }
-            else
-            {
-                if (response.authenticationSuccess)
+                Response response;
+                int check_res = privacyidea.validateCheckFIDO(signResponse, signRequest.transaction_id, config.url, response);
+                if (check_res == 0 && response.authenticationSuccess)
                 {
                     pam_syslog(pamh, LOG_INFO, "privacyidea authentication successful");
-                    // Get the user from PAM if there is one
+                    // Set the PAM_USER if it's not already set
                     const char *currentPamUser = nullptr;
                     if (pam_get_user(pamh, &currentPamUser, nullptr) != PAM_SUCCESS || currentPamUser == nullptr)
                     {
-                        pam_syslog(pamh, LOG_INFO, "No User from PAM, setting user from server response: %s", response.username.c_str());
                         pam_set_item(pamh, PAM_USER, response.username.c_str());
-                        pamRet = PAM_SUCCESS;
                     }
-                    else
-                    {
-                        auto pamUserString = std::string(currentPamUser);
-                        if (!pamUserString.empty() && pamUserString != response.username)
-                        {
-                            pam_syslog(pamh, LOG_ERR, "User mismatch: pam=%s, privacyidea=%s", currentPamUser, response.username.c_str());
-                            pamRet = PAM_AUTH_ERR;
-                        }
-                        else
-                        {
-                            pamRet = PAM_SUCCESS;
-                        }
-                    }
+                    pamRet = PAM_SUCCESS;
                 }
                 else
                 {
-                    pam_syslog(pamh, LOG_ERR, "authentication failed");
+                    pam_syslog(pamh, LOG_ERR, "Online authentication check failed.");
                     if (!response.errorMessage.empty()) {
-                        pam_syslog(pamh, LOG_ERR, "Server error message: %s", response.errorMessage.c_str());
                         pam_prompt(pamh, PAM_ERROR_MSG, NULL, "%s", response.errorMessage.c_str());
                     }
                     pamRet = PAM_AUTH_ERR;
                 }
+                break; // Success, exit the device loop
             }
+            else if (res == FIDO_ERR_NO_CREDENTIALS) {
+                pam_syslog(pamh, LOG_DEBUG, "No matching credentials found on device %s, trying next.", device.toString().c_str());
+                // Continue to the next device in the loop
+                } else {
+                // Other unrecoverable error, break and report failure
+                pam_syslog(pamh, LOG_ERR, "Signing failed on device %s with unrecoverable error: %s (code: %d)", device.toString().c_str(), fido_strerr(res), res);
+                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Signing failed: %s", fido_strerr(res));
+                pamRet = PAM_AUTH_ERR; // Set pamRet to indicate failure
+                break;
+            }
+        }
+        // After the loop, if pamRet is not PAM_SUCCESS, it means all devices failed or an unrecoverable error occurred.
+        if (pamRet != PAM_SUCCESS)
+        {
+            // If the last error was NO_CREDENTIALS, it means no device had the right key.
+            if (res == FIDO_ERR_NO_CREDENTIALS) {
+                pam_syslog(pamh, LOG_ERR, "No security key with matching credentials found after trying all devices.");
+                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "No security key with matching credentials found.");
+            } else if (pamRet == PAM_AUTH_ERR) { // For other specific errors, the message was already set.
+                // The specific error message was already logged and prompted inside the loop.
+            } else { // Fallback for any other unhandled case
+                pam_syslog(pamh, LOG_ERR, "Online authentication failed for an unknown reason.");
+                pam_prompt(pamh, PAM_ERROR_MSG, NULL, "Online authentication failed.");
+            }
+            pamRet = PAM_AUTH_ERR;
         }
     }
     
