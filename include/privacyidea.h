@@ -30,8 +30,6 @@ public:
 
     int validateInitializePasskey(Response &response);
 
-    int validateCheck(const std::string &user, const std::string &pass, const std::string &transactionID, Response &response);
-
     int sendRequest(const std::string &url, const std::map<std::string, std::string> &parameters, const std::map<std::string, std::string> &headers,
                     std::string &response, bool postRequest = true);
 

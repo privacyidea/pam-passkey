@@ -142,42 +142,6 @@ size_t writeCallback(void *contents, size_t size, size_t nmemb, void *userp)
     return size * nmemb;
 }
 
-int PrivacyIDEA::validateCheck(const string &user, const string &pass, const string &transactionID,
-                               Response &response)
-{
-    int retval = 0;
-    string strResponse;
-    map<string, string> param{make_pair("user", user), make_pair("pass", pass)};
-
-    if (!transactionID.empty())
-    {
-        param.emplace("transaction_id", transactionID);
-    }
-
-    if (!realm.empty())
-    {
-        param.emplace("realm", realm);
-    }
-
-    map<string, string> headers;
-
-    retval = sendRequest(baseURL + "/validate/check", param, headers, strResponse);
-    if (retval != 0)
-    {
-        // The request failed. Log a descriptive error and return immediately.
-        pam_syslog(pamh, LOG_ERR, "validateCheck: The request to the server failed with cURL error: %d (%s)", retval, curl_easy_strerror((CURLcode)retval));
-        return retval;
-    }
-
-    retval = parseResponse(strResponse, response);
-    if (retval != 0)
-    {
-        pam_syslog(pamh, LOG_ERR, "validateCheck: Unable to parse the response from the privacyIDEA server. Error %d", retval);
-    }
-
-    return retval;
-}
-
 int PrivacyIDEA::sendRequest(const std::string &url, const std::map<std::string, std::string> &parameters,
                              const std::map<std::string, std::string> &headers,
                              std::string &response, bool postRequest)
@@ -312,6 +276,11 @@ int PrivacyIDEA::validateCheckFIDO(const FIDOSignResponse &signResponse, const s
     if (!user.empty())
     {
         parameters.try_emplace("user", user);
+    }
+
+    if (!realm.empty())
+    {
+        parameters.try_emplace("realm", realm);
     }
 
     std::map<std::string, std::string> headers = {
@@ -508,16 +477,16 @@ int PrivacyIDEA::offlineRefillFIDO(OfflineFIDOCredential &cred)
     if (cred.refilltoken.empty())
     {
         pam_syslog(pamh, LOG_DEBUG, "FIDO credential with serial '%s' has no refill token, skipping refill.", cred.serial.c_str());
-        return 0; // Not an error, just nothing to refill
+        return 0;
     }
 
-    // The server's /validate/offlinerefill endpoint expects 'pass', 'refilltoken', 'serial'.
-    // For FIDO, 'pass' is not applicable, so we send an empty string.
     map<string, string> parameters =
         {
-            {"pass", ""}, // Empty password for FIDO refill
+            {"pass", ""},
             {"refilltoken", cred.refilltoken},
-            {"serial", cred.serial}};
+            {"serial", cred.serial}
+        };
+
     map<string, string> headers;
     string response;
 
