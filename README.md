@@ -43,7 +43,7 @@ Here is a list of all available configuration options:
 To use offline authentication, you must first provision the offline credentials from the privacyIDEA server.
 
 ### Provisioning Offline Credentials
-An offline credential is created by performing at least one successful **online** authentication with a FIDO token that has been configured for offline use in your privacyIDEA policies. During this successful online login, the necessary credential data (public key, credential ID, etc.) is sent to the PAM module and stored locally in the file specified by the `offlineFile` option.
+An offline credential is created by performing at least one successful **online** authentication with a FIDO token that has been configured for offline use on the corresponding token detail page. During this successful online login, the necessary credential data (public key, credential ID, etc.) is sent to the PAM module and stored locally in the file specified by the `offlineFile` option. Make sure to set permissions on that file accordingly.
 
 ### Usernameless Offline Authentication
 If the PAM stack does not provide a username (e.g., during a pre-login authentication scenario like `lightdm`), the module will attempt a usernameless offline authentication. It will use all available offline credentials and, upon successful authentication with a security key, will identify the user from the credential that was used. The identified username is then set in the PAM context (`PAM_USER`).
