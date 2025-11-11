@@ -52,5 +52,5 @@ set_target_properties(privacyidea_pam_passkey PROPERTIES
 # This requires administrator privileges (e.g., 'sudo make install').
 # GNUInstallDirs typically finds the multi-arch path (e.g., /usr/lib/x86_64-linux-gnu/security)
 install(TARGETS privacyidea_pam_passkey
-    DESTINATION /usr/lib/x86_64-linux-gnu/security
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/security
 )

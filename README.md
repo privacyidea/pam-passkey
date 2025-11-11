@@ -17,7 +17,7 @@ The module is configured by adding it to your PAM stack (e.g., in `/etc/pam.d/su
 
 **Example for `/etc/pam.d/sudo`:**
 ```
-auth sufficient pam_privacyidea_passkey.so url=https://your.privacyidea.server rpid=your.rpid.com debug
+auth sufficient pam_privacyidea_passkey.so url=[https://your.privacyidea.server](https://your.privacyidea.server) rpid=your.rpid.com debug
 ```
 
 ### Options
@@ -52,33 +52,59 @@ If a username is provided by the PAM stack, the module will only attempt to use 
 
 ## Build and Installation
 
-To build and install `pam_privacyidea_passkey`, follow these steps:
+### 1. Prerequisites
+You will need a C++ compiler and the development headers for several libraries. On Debian/Ubuntu-based systems, you can install them with the following command:
 
-1.  **Prerequisites**:
-    You will need a C++ compiler and the development headers for several libraries. On Debian/Ubuntu-based systems, you can install them with the following command:
+```bash
+sudo apt install build-essential cmake pkg-config libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev nlohmann-json3-dev libpam0g-dev
+```
+
+This will install:
+* `build-essential`: Provides a C++ compiler (like g++) and other essential tools.
+* `cmake`: The build system generator.
+* `pkg-config`: Used by CMake to find libraries.
+* `libfido2-dev`: For FIDO2 device communication.
+* `libcbor-dev`: Required by `libfido2` for CBOR data handling.
+* `libcurl4-openssl-dev`: For making HTTP requests to the privacyIDEA server.
+* `libssl-dev`: Required for cryptographic functions.
+* `nlohmann-json3-dev`: For parsing JSON responses from the server.
+* `libpam0g-dev`: For interfacing with the PAM stack.
+
+### 2. Build
+```bash
+mkdir build
+cd build
+cmake ..
+make
+```
+
+### 3. Install
+```bash
+sudo make install
+```
+This will typically install the `pam_privacyidea_passkey.so` module to `/lib/x86_64-linux-gnu/security/` or a similar PAM module directory, depending on your system.
+
+---
+
+### Building for Ubuntu 22.04 (via Docker)
+
+Ubuntu 22.04 ships with older libraries (like `libfido2`) than newer systems like Ubuntu 24.04. To compile a module that is backward-compatible with Ubuntu 22.04, you **must** build it in an Ubuntu 22.04 environment. The easiest and cleanest way to do this is with Docker. The Dockerfile is already contained in this repository.
+
+
+1.  **Build the Docker Image**:
+    Run the following command to build the image:
 
     ```bash
-    sudo apt install build-essential cmake libfido2-dev libcurl4-openssl-dev nlohmann-json3-dev libpam0g-dev
+    docker build -t pampasskey-builder .
     ```
 
-    This will install:
-    *   `build-essential`: Provides a C++ compiler (like g++) and other essential tools.
-    *   `cmake`: The build system generator.
-    *   `libfido2-dev`: For FIDO2 device communication.
-    *   `libcurl4-openssl-dev`: For making HTTP requests to the privacyIDEA server.
-    *   `nlohmann-json3-dev`: For parsing JSON responses from the server.
-    *   `libpam0g-dev`: For interfacing with the PAM stack.
+2.  **Extract the Compiled Module**:
+    These commands will create a temporary container, copy the compiled `.so` file from the image to your current directory, and then clean up the container:
 
-2.  **Build**:
     ```bash
-    mkdir build
-    cd build
-    cmake ..
-    make
+    docker create --name temp_container pampasskey-builder
+    docker cp temp_container:/artifacts/privacyidea_pam_passkey.so .
+    docker rm temp_container
     ```
 
-3.  **Install**:
-    ```bash
-    sudo make install
-    ```
-    This will typically install the `pam_privacyidea_passkey.so` module to `/lib/x86_64-linux-gnu/security/` or a similar PAM module directory, depending on your system.
+You will now have a `privacyidea_pam_passkey.so` file in your directory that is compatible with Ubuntu 22.04.

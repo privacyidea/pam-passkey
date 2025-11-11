@@ -383,10 +383,11 @@ FIDODevice::FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo, bool 
 		{
 			_supportedAlgorithms.push_back(fido_cbor_info_algorithm_cose(info, i));
 		}
+		// The following is not compatible with older versions of libfido2 that are available for e.g. ubuntu22
 		// Remaining Resident Keys
-		_remainingResidentKeys = fido_cbor_info_rk_remaining(info);
+		//_remainingResidentKeys = fido_cbor_info_rk_remaining(info);
 		// New PIN required
-		_newPinRequired = fido_cbor_info_new_pin_required(info);
+		//_newPinRequired = fido_cbor_info_new_pin_required(info);
 	}
 	else
 	{
@@ -424,8 +425,8 @@ int FIDODevice::sign(
 	auto cbId = fido_assert_id_len(fido_assertion.get(), 0);
 	signResponse.credentialid = Convert::Base64URLEncode(pbId, cbId);
 
-	auto pbAuthData = fido_assert_authdata_raw_ptr(fido_assertion.get(), 0);
-	auto cbAuthData = fido_assert_authdata_raw_len(fido_assertion.get(), 0);
+	auto pbAuthData = fido_assert_authdata_ptr(fido_assertion.get(), 0);
+	auto cbAuthData = fido_assert_authdata_len(fido_assertion.get(), 0);
 	signResponse.authenticatordata = Convert::Base64URLEncode(pbAuthData, cbAuthData);
 
 	auto pbSig = fido_assert_sig_ptr(fido_assertion.get(), 0);
