@@ -1,6 +1,7 @@
 # pam_privacyidea_passkey
 
 A PAM module for authenticating with FIDO2/Passkey credentials against a privacyIDEA server. It supports both online and offline authentication.
+This module does not work with Ubuntu 22, as it requires libfido2 in version 1.13.0 or higher.
 
 ## Features
 
