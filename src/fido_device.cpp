@@ -425,8 +425,8 @@ int FIDODevice::sign(
 	auto cbId = fido_assert_id_len(fido_assertion.get(), 0);
 	signResponse.credentialid = Convert::Base64URLEncode(pbId, cbId);
 
-	auto pbAuthData = fido_assert_authdata_ptr(fido_assertion.get(), 0);
-	auto cbAuthData = fido_assert_authdata_len(fido_assertion.get(), 0);
+	auto pbAuthData = fido_assert_authdata_raw_ptr(fido_assertion.get(), 0);
+	auto cbAuthData = fido_assert_authdata_raw_len(fido_assertion.get(), 0);
 	signResponse.authenticatordata = Convert::Base64URLEncode(pbAuthData, cbAuthData);
 
 	auto pbSig = fido_assert_sig_ptr(fido_assertion.get(), 0);

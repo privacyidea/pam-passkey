@@ -17,6 +17,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(FIDO2 REQUIRED libfido2)
 pkg_check_modules(OPENSSL REQUIRED openssl)
+find_library(PAM_LIBRARY pam REQUIRED)
 
 # Include directories
 include_directories(
@@ -27,7 +28,7 @@ include_directories(
 )
 
 # Add source files
-add_library(privacyidea_pam_passkey MODULE
+add_library(pam_privacyidea_passkey MODULE
     src/privacyidea_passkey.cpp
     src/privacyidea.cpp
     src/fido_device.cpp
@@ -35,15 +36,16 @@ add_library(privacyidea_pam_passkey MODULE
 )
 
 # Link libraries
-target_link_libraries(privacyidea_pam_passkey
+target_link_libraries(pam_privacyidea_passkey
     PRIVATE
     ${CURL_LIBRARIES}
     ${FIDO2_LIBRARIES}
     ${OPENSSL_LIBRARIES}
+    ${PAM_LIBRARY}
 )
 
 # Set properties for the PAM module
-set_target_properties(privacyidea_pam_passkey PROPERTIES
+set_target_properties(pam_privacyidea_passkey PROPERTIES
     PREFIX ""
     SUFFIX ".so"
 )
@@ -51,6 +53,6 @@ set_target_properties(privacyidea_pam_passkey PROPERTIES
 # For testing, install the PAM module to the system's security directory.
 # This requires administrator privileges (e.g., 'sudo make install').
 # GNUInstallDirs typically finds the multi-arch path (e.g., /usr/lib/x86_64-linux-gnu/security)
-install(TARGETS privacyidea_pam_passkey
+install(TARGETS pam_privacyidea_passkey
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/security
 )

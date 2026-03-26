@@ -86,25 +86,3 @@ This will typically install the `pam_privacyidea_passkey.so` module to `/lib/x86
 
 ---
 
-### Building for Ubuntu 22.04 (via Docker)
-
-Ubuntu 22.04 ships with older libraries (like `libfido2`) than newer systems like Ubuntu 24.04. To compile a module that is backward-compatible with Ubuntu 22.04, you **must** build it in an Ubuntu 22.04 environment. The easiest and cleanest way to do this is with Docker. The Dockerfile is already contained in this repository.
-
-
-1.  **Build the Docker Image**:
-    Run the following command to build the image:
-
-    ```bash
-    docker build -t pampasskey-builder .
-    ```
-
-2.  **Extract the Compiled Module**:
-    These commands will create a temporary container, copy the compiled `.so` file from the image to your current directory, and then clean up the container:
-
-    ```bash
-    docker create --name temp_container pampasskey-builder
-    docker cp temp_container:/artifacts/privacyidea_pam_passkey.so .
-    docker rm temp_container
-    ```
-
-You will now have a `privacyidea_pam_passkey.so` file in your directory that is compatible with Ubuntu 22.04.
