@@ -34,8 +34,12 @@ jobs:
         run: |
           if command -v apt-get >/dev/null; then
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update
-            apt-get install -y --no-install-recommends \
+            # Containers run as root (sudo not installed). The bare
+            # ubuntu-24.04 runner uses an unprivileged user and needs sudo.
+            SUDO=""
+            if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+            $SUDO apt-get update
+            $SUDO apt-get install -y --no-install-recommends \
               build-essential cmake pkg-config \
               libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
               nlohmann-json3-dev libpam0g-dev \

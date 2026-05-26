@@ -499,6 +499,10 @@ bool PrivacyIDEA::writeAtomically(const std::string &file, const std::string &co
     struct LockGuard
     {
         int fd;
+        LockGuard(const LockGuard &) = delete;
+        LockGuard &operator=(const LockGuard &) = delete;
+        LockGuard(LockGuard &&) = delete;
+        LockGuard &operator=(LockGuard &&) = delete;
         ~LockGuard() { if (fd >= 0) ::close(fd); }
     } lockGuard{lockFd};
 
