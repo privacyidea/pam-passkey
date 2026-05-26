@@ -1,0 +1,15 @@
+{
+  "auth_items": {
+    "offline": [
+      {
+        "refilltoken": "4e6063807d22d5baf2aa1f958d068219559ccc6c5c43da54c3f96c71b4c3912f8bfd203a3ff32e09",
+        "response": {},
+        "serial": "PIPK0000BE5A"
+      }
+    ]
+  },
+  "result": {
+    "status": true,
+    "value": true
+  }
+}

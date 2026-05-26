@@ -1,0 +1,28 @@
+{
+  "auth_items": {
+    "offline": [
+      {
+        "refilltoken": "7bc6cfd5ffb726c5e795ad3776f5936dbfa5137eee7f8b63f8c5f452ec9600d1f0aa6aeba52182a8",
+        "response": {
+          "credentialId": "T9TJpDbUuq0TIdIpErltERuboEdR1GBa7pVtdYMQYTQZ582wmBwp5TWuZ_sE_Ag4",
+          "pubKey": "pQECAyYgASFYIE_UyaQ21LqtEyHSKRJpShO-wOGDv7qDWURk30_U26xtIlgglAzzrE4UkAFqhrNdg2OToNFk6it8EAzLuZwfWM8neyc",
+          "rpId": "cool.nils",
+          "userId": "F85o6MXihU61SYIvDhMofjlzKuwmPKOYn-U_o2N4gmVdRQCmN1UEQpeyH1Rdh1Oo-jR_t6Sw9BKFVqOls9pwWQ"
+        },
+        "serial": "PIPK0000BE5A",
+        "user": "hans",
+        "username": "hans"
+      }
+    ]
+  },
+  "detail": {
+    "message": "Found matching challenge",
+    "serial": "PIPK0000BE5A",
+    "username": "hans"
+  },
+  "result": {
+    "authentication": "ACCEPT",
+    "status": true,
+    "value": true
+  }
+}

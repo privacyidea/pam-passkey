@@ -1,0 +1,17 @@
+{
+  "detail": {
+    "passkey": {
+      "challenge": "MisSxHzhdilz_l3f_qH6YkR1eQkmPQ7DDWsvrPkMDJQ",
+      "message": "Please authenticate with your passkey!",
+      "rpId": "cool.nils",
+      "transaction_id": "10388619430577331297",
+      "user_verification": "required"
+    },
+    "transaction_id": "10388619430577331297"
+  },
+  "result": {
+    "authentication": "CHALLENGE",
+    "status": true,
+    "value": false
+  }
+}

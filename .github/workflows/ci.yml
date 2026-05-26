@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build the PAM module against the libraries shipped by each target distro.
+  # The README states Ubuntu 22 is unsupported (libfido2 too old) so we only
+  # build against 24.04 and Debian (stable + testing).
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            container: ""
+          - os: debian-stable
+            container: debian:stable
+          - os: debian-testing
+            container: debian:testing
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install dependencies
+        run: |
+          if command -v apt-get >/dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential cmake pkg-config \
+              libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
+              nlohmann-json3-dev libpam0g-dev \
+              ca-certificates git
+          fi
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+
+  # Unit tests on the reference platform. GoogleTest is pulled in via
+  # FetchContent so no extra apt package is needed.
+  test:
+    name: Unit tests (${{ matrix.build_type }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
+            nlohmann-json3-dev libpam0g-dev
+      - name: Cache FetchContent (gtest)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-${{ matrix.build_type }}
+      - name: Configure with tests
+        run: cmake -B build -S . -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+  # Run the unit tests under AddressSanitizer + UndefinedBehaviorSanitizer.
+  # ASan would have caught the fido_dev_info_t leak we fixed earlier; UBSan
+  # catches integer/pointer mistakes that are easy to make in the CBOR /
+  # OpenSSL adjacent code.
+  sanitizers:
+    name: Sanitizers (ASan+UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
+            nlohmann-json3-dev libpam0g-dev
+      - name: Cache FetchContent (gtest)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-sanitizers
+      - name: Configure with sanitizers
+        run: |
+          cmake -B build -S . -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run tests under sanitizers
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --output-on-failure
+
+  # Lint with a focused checks list — see .clang-tidy. WarningsAsErrors is
+  # set to "*" in .clang-tidy, so any finding in an enabled category fails
+  # the job.
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config clang-tidy \
+            libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
+            nlohmann-json3-dev libpam0g-dev
+      - name: Configure (emit compile_commands.json)
+        run: cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Build (generates compile DB and any generated headers)
+        run: cmake --build build --parallel
+      - name: Run clang-tidy
+        run: |
+          clang-tidy -p build src/*.cpp

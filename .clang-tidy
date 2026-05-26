@@ -1,0 +1,64 @@
+# Focused checks list for pam-passkey. The default set produces too much noise
+# (style preferences that don't matter for a security module); these are the
+# categories where findings tend to be real bugs.
+#
+# Notable opt-outs:
+#   -modernize-use-trailing-return-type — style preference, not a bug
+#   -*-magic-numbers                    — too pedantic for this codebase
+#   -bugprone-easily-swappable-parameters — high false-positive rate
+#   -cppcoreguidelines-pro-bounds-*     — std::array nudges, not actionable here
+#   -cppcoreguidelines-avoid-c-arrays   — fights libfido2 / libcurl C APIs
+#   -fuchsia-*, -llvm-*, -altera-*      — out-of-scope upstream conventions
+#   -readability-identifier-length      — would flag i, j, x, y everywhere
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-init-variables,
+  -cppcoreguidelines-narrowing-conversions,
+  -cppcoreguidelines-prefer-member-initializer,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-cstyle-cast,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -modernize-avoid-c-arrays,
+  -modernize-deprecated-headers,
+  -modernize-raw-string-literal,
+  -modernize-use-trailing-return-type,
+  -performance-unnecessary-value-param,
+  -readability-braces-around-statements,
+  -readability-else-after-return,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-isolate-declaration,
+  -readability-magic-numbers,
+  -readability-qualified-auto,
+  -readability-redundant-declaration,
+  -readability-simplify-boolean-expr
+
+# Each opt-out above is intentional — see CI report. Categories that flagged
+# real issues (concurrency-mt-unsafe, cppcoreguidelines-pro-type-member-init,
+# bugprone-unused-return-value, modernize-use-nullptr, cppcoreguidelines-no-malloc,
+# cppcoreguidelines-owning-memory) stay enabled.
+
+# Fail the build on any remaining warning so the gate is meaningful.
+WarningsAsErrors: "*"
+
+# Apply to project sources only, not vendored / dependency code.
+HeaderFilterRegex: "^(include|src)/"
+
+FormatStyle: file

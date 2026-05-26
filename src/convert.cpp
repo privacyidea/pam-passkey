@@ -24,7 +24,18 @@ std::vector<unsigned char> Convert::Base64Decode(const std::string &base64String
         // Handle error, maybe log it
         return {};
     }
-    decoded_data.resize(final_len);
+    // EVP_DecodeBlock counts trailing '=' as zero bytes in its returned length.
+    // Strip them so the result reflects the actual decoded payload size.
+    int padding = 0;
+    for (auto it = base64String.rbegin(); it != base64String.rend() && *it == '='; ++it)
+        ++padding;
+    if (final_len < padding)
+    {
+        // Defensive: prevents underflow into a huge size_t if final_len ever
+        // ends up smaller than padding (e.g. all-padding input "====").
+        return {};
+    }
+    decoded_data.resize(final_len - padding);
     return decoded_data;
 }
 
@@ -47,13 +58,19 @@ std::string Convert::Base64Encode(const unsigned char *data, const size_t size, 
 {
     size_t encoded_len = 4 * ((size + 2) / 3);
     std::string encoded_string(encoded_len, '\0');
-    int final_len = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&encoded_string[0]), data, size);
+    int final_len = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(encoded_string.data()), data, size);
     if (final_len < 0)
     {
         // Handle error, maybe log it
         return "";
     }
     encoded_string.resize(final_len);
+    // EVP_EncodeBlock always pads; honor padded=false by stripping trailing '='.
+    if (!padded)
+    {
+        while (!encoded_string.empty() && encoded_string.back() == '=')
+            encoded_string.pop_back();
+    }
     return encoded_string;
 }
 
@@ -76,23 +93,28 @@ std::string Convert::Base64URLEncode(const std::vector<unsigned char> &data, boo
 
 std::string Convert::UrlEncode(const std::string &input)
 {
+    // Locale-independent: check ASCII unreserved characters per RFC 3986 by
+    // explicit ranges. std::isalnum is locale-dependent and would behave
+    // differently under non-C locales (e.g. tr_TR treating Turkish letters
+    // as alphanumeric and emitting them raw).
+    auto isUnreserved = [](unsigned char c) noexcept {
+        return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+               || c == '-' || c == '_' || c == '.' || c == '~';
+    };
+
     std::ostringstream escaped;
     escaped.fill('0');
-    escaped << std::hex;
+    escaped << std::hex << std::uppercase;
 
-    for (auto c : input)
+    for (unsigned char c : input)
     {
-        // Keep alphanumeric and other accepted characters intact
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+        if (isUnreserved(c))
         {
-            escaped << c;
+            escaped << static_cast<char>(c);
         }
-        // Any other characters are percent-encoded
         else
         {
-            escaped << std::uppercase;
-            escaped << '%' << std::setw(2) << int((unsigned char)c);
-            escaped << std::nouppercase;
+            escaped << '%' << std::setw(2) << static_cast<int>(c);
         }
     }
 
@@ -120,11 +142,6 @@ std::string Convert::GenerateRandomAsBase64URL(size_t size)
         return "";
     }
     return Base64URLEncode(buffer, false);
-}
-
-void Convert::Base64ToABase64(std::string &base64)
-{
-    std::replace(base64.begin(), base64.end(), '.', '+');
 }
 
 std::string Convert::BytesToHex(const unsigned char *data, const size_t dataSize)
@@ -180,18 +197,25 @@ std::string Convert::timeTToIso8601(time_t timestamp)
     {
         return "";
     }
-    std::tm *gmt = std::gmtime(&timestamp);
-    if (!gmt)
+    // Thread-safe variant — PAM modules can be loaded into multi-threaded
+    // daemons (e.g. sshd) where the static buffer used by std::gmtime is unsafe.
+    std::tm gmt{};
+    if (gmtime_r(&timestamp, &gmt) == nullptr)
     {
         return ""; // Error converting time
     }
     std::stringstream ss;
-    ss << std::put_time(gmt, "%Y-%m-%dT%H:%M:%SZ");
+    ss << std::put_time(&gmt, "%Y-%m-%dT%H:%M:%SZ");
     return ss.str();
 }
 
 time_t Convert::iso8601ToTimeT(const std::string &isoString)
 {
+    // Sentinels:
+    //   0  → empty input, "no expiry configured"
+    //  -1  → input was non-empty but failed to parse; the caller should treat
+    //        this as expired so that a corrupt timestamp fails closed rather
+    //        than silently disabling the expiry check on that credential.
     if (isoString.empty())
     {
         return 0;
@@ -201,7 +225,7 @@ time_t Convert::iso8601ToTimeT(const std::string &isoString)
     ss >> std::get_time(&t, "%Y-%m-%dT%H:%M:%SZ");
     if (ss.fail())
     {
-        return 0; // Parsing failed
+        return static_cast<time_t>(-1);
     }
     return timegm(&t); // timegm is a non-standard but widely available GNU extension that correctly handles UTC.
 }

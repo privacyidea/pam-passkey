@@ -1,11 +1,11 @@
 #include <fido/es256.h>
+#include <fido/param.h>
 #include <algorithm>
 #include <security/pam_ext.h> // For pam_syslog
-#include <cbor.h>
 #include "fido_device.h"
 #include "privacyidea.h"
 #include "convert.h"
-#include <openssl/param_build.h>
+#include "cose_key.h"
 #include <sys/syslog.h>
 
 struct FidoDevDeleter
@@ -61,118 +61,18 @@ struct BIGNUMDeleter
 };
 using unique_bignum_t = std::unique_ptr<BIGNUM, BIGNUMDeleter>;
 
-constexpr auto cosePubKeyAlg = 3;
-constexpr auto cosePubKeyX = -2;
-constexpr auto cosePubKeyY = -3;
+constexpr size_t MAX_FIDO_DEVICES = 64;
 
-int FIDODevice::ecKeyFromCbor(
-	const std::string &cborPubKey,
-	EVP_PKEY **pkey,
-	int *algorithm) const
+struct FidoDevInfoDeleter
 {
-	int res = FIDO_OK;
-	std::vector<unsigned char> pubKeyBytes;
-	if (cborPubKey.length() % 2 == 0)
+	void operator()(fido_dev_info_t *list) const
 	{
-		// hex encoded
-		pubKeyBytes = Convert::HexToBytes(cborPubKey);
+		if (list)
+			fido_dev_info_free(&list, MAX_FIDO_DEVICES);
 	}
-	else
-	{
-		pubKeyBytes = Convert::Base64URLDecode(cborPubKey);
-	}
+};
+using unique_fido_dev_info_t = std::unique_ptr<fido_dev_info_t, FidoDevInfoDeleter>;
 
-	struct cbor_load_result result;
-	cbor_item_t *map = cbor_load(pubKeyBytes.data(), pubKeyBytes.size(), &result);
-
-	if (map == NULL)
-	{
-		pam_syslog(_pamh, LOG_ERR, "Failed to parse CBOR public key");
-		return FIDO_ERR_INVALID_ARGUMENT;
-	}
-	if (!cbor_isa_map(map))
-	{
-		pam_syslog(_pamh, LOG_ERR, "CBOR public key is not a map");
-		cbor_decref(&map);
-		return FIDO_ERR_INVALID_ARGUMENT;
-	}
-
-	size_t size = cbor_map_size(map);
-	cbor_pair *pairs = cbor_map_handle(map);
-	int alg = 0;
-	for (size_t i = 0; i < size; i++)
-	{
-		if (cbor_isa_uint(pairs[i].key) && cbor_get_uint8(pairs[i].key) == cosePubKeyAlg)
-		{
-			if (cbor_isa_negint(pairs[i].value))
-			{
-				alg = -1 - cbor_get_int(pairs[i].value);
-			}
-		}
-	}
-
-	if (alg == COSE_ES256)
-	{
-		*algorithm = alg;
-		std::vector<uint8_t> x, y;
-		for (size_t i = 0; i < size; i++)
-		{
-			if (cbor_isa_negint(pairs[i].key))
-			{
-				int key = -1 - cbor_get_int(pairs[i].key);
-				if (key == cosePubKeyX && cbor_isa_bytestring(pairs[i].value))
-				{
-					x.assign(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
-				}
-				else if (key == cosePubKeyY && cbor_isa_bytestring(pairs[i].value))
-				{
-					y.assign(cbor_bytestring_handle(pairs[i].value), cbor_bytestring_handle(pairs[i].value) + cbor_bytestring_length(pairs[i].value));
-				}
-			}
-		}
-
-		// OpenSSL 3.0+ way of creating a key from parameters
-		OSSL_PARAM_BLD *param_bld = OSSL_PARAM_BLD_new();
-		EVP_PKEY_CTX *ctx = nullptr;
-		if (param_bld)
-		{
-			OSSL_PARAM_BLD_push_utf8_string(param_bld, "group", "prime256v1", 0);
-			OSSL_PARAM_BLD_push_octet_string(param_bld, "pub", x.data(), x.size());
-			OSSL_PARAM_BLD_push_octet_string(param_bld, "pub", y.data(), y.size());
-
-			OSSL_PARAM *params = OSSL_PARAM_BLD_to_param(param_bld);
-			if (params)
-			{
-				ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
-				if (ctx)
-				{
-					if (EVP_PKEY_fromdata_init(ctx) > 0 && EVP_PKEY_fromdata(ctx, pkey, EVP_PKEY_PUBLIC_KEY, params) > 0)
-					{
-						// Success
-					}
-					else
-					{
-						*pkey = nullptr;
-						res = FIDO_ERR_INTERNAL;
-					}
-					EVP_PKEY_CTX_free(ctx);
-				}
-				OSSL_PARAM_free(params);
-			}
-			OSSL_PARAM_BLD_free(param_bld);
-		}
-		if (*pkey == nullptr)
-			res = FIDO_ERR_INTERNAL;
-	}
-	else
-	{
-		pam_syslog(_pamh, LOG_ERR, "Unimplemented alg: %d", alg);
-		res = FIDO_ERR_INVALID_ARGUMENT;
-	}
-
-	cbor_decref(&map);
-	return res;
-}
 
 static unique_fido_dev_t OpenFidoDevice(pam_handle_t *pamh, const std::string &devicePath, int &outError)
 {
@@ -203,58 +103,121 @@ static unique_fido_dev_t OpenFidoDevice(pam_handle_t *pamh, const std::string &d
 	return dev;
 }
 
-std::vector<FIDODevice> FIDODevice::getDevices(pam_handle_t *pamh, bool log)
+std::vector<FIDODevice> FIDODevice::getDevices(pam_handle_t *pamh)
 {
-	if (log)
-	{
-		pam_syslog(pamh, LOG_DEBUG, "Searching for connected FIDO devices");
-	}
 	std::vector<FIDODevice> ret;
-	size_t ndevs;
+	size_t ndevs = 0;
 	int res = FIDO_OK;
-	fido_dev_info_t *deviceList = nullptr;
-	if ((deviceList = fido_dev_info_new(64)) == nullptr)
+	unique_fido_dev_info_t deviceList(fido_dev_info_new(MAX_FIDO_DEVICES));
+	if (!deviceList)
 	{
-		pam_syslog(pamh, LOG_ERR, "fido_dev_info_new returned NULL");
+		pam_syslog(pamh, LOG_ERR, "fido_dev_info_new returned nullptr");
 		return ret;
 	}
 
-	if ((res = fido_dev_info_manifest(deviceList, 64, &ndevs)) != FIDO_OK)
+	if ((res = fido_dev_info_manifest(deviceList.get(), MAX_FIDO_DEVICES, &ndevs)) != FIDO_OK)
 	{
-		std::string fidoStrerr = fido_strerr(res);
-		pam_syslog(pamh, LOG_ERR, "fido_dev_info_manifest: %s (code: %d)", fidoStrerr.c_str(), res);
+		pam_syslog(pamh, LOG_ERR, "fido_dev_info_manifest: %s (code: %d)", fido_strerr(res), res);
 		return ret;
 	}
 
 	for (size_t i = 0; i < ndevs; i++)
 	{
-		const fido_dev_info_t *di = fido_dev_info_ptr(deviceList, i);
-		ret.emplace_back(pamh, di, log);
-	}
-	if (log)
-	{
-		pam_syslog(pamh, LOG_DEBUG, "Found %zu FIDO device(s)", ret.size());
+		const fido_dev_info_t *di = fido_dev_info_ptr(deviceList.get(), i);
+		ret.emplace_back(pamh, di);
 	}
 	return ret;
 }
 
-int FIDODevice::signAndVerifyAssertion(
-	std::vector<OfflineFIDOCredential> &offlineData,
+// Configure a fido_assert_t for the given signRequest and run
+// fido_dev_get_assert on the supplied (already-open) device. Used by both the
+// one-shot and parallel paths so the assertion setup lives in one place.
+static int doGetAssert(
+	pam_handle_t *pamh,
+	fido_dev_t *dev,
+	const FIDOSignRequest &signRequest,
 	const std::string &origin,
-	const std::string &pin,
-	std::string &serialUsed,
-	uint32_t &newSignCount) const
+	const char *pin,
+	fido_assert_t **assert,
+	std::vector<unsigned char> &clientDataOut)
 {
-	// Make a signRequest from the offlineData
+	int res = FIDO_OK;
+	if ((*assert = fido_assert_new()) == nullptr)
+	{
+		pam_syslog(pamh, LOG_ERR, "fido_assert_new failed");
+		return FIDO_ERR_INTERNAL;
+	}
+
+	std::string challenge = Convert::Base64URLEncode(
+		reinterpret_cast<const unsigned char *>(signRequest.challenge.data()),
+		signRequest.challenge.size());
+	std::string cData = "{\"type\": \"webauthn.get\", \"challenge\": \"" + challenge + "\", \"origin\": \"" + origin + "\", \"crossOrigin\": false}";
+	clientDataOut = std::vector<unsigned char>(cData.begin(), cData.end());
+	res = fido_assert_set_clientdata(*assert, clientDataOut.data(), clientDataOut.size());
+	if (res != FIDO_OK)
+	{
+		pam_syslog(pamh, LOG_ERR, "fido_assert_set_clientdata: %s (code: %d)", fido_strerr(res), res);
+		return res;
+	}
+	res = fido_assert_set_rp(*assert, signRequest.rpId.c_str());
+	if (res != FIDO_OK)
+	{
+		pam_syslog(pamh, LOG_ERR, "fido_assert_set_rp: %s (code: %d)", fido_strerr(res), res);
+		return res;
+	}
+	if (fido_dev_has_uv(dev) && signRequest.userVerification == "discouraged")
+	{
+		res = fido_assert_set_uv(*assert, FIDO_OPT_FALSE);
+		if (res != FIDO_OK)
+			pam_syslog(pamh, LOG_ERR, "fido_assert_set_uv: %s (code: %d)", fido_strerr(res), res);
+	}
+	return fido_dev_get_assert(dev, *assert, (pin && *pin) ? pin : nullptr);
+}
+
+// Shared implementation body for signAndVerifyAssertion variants.
+static int doSignAndVerifyAssertion(
+	pam_handle_t *pamh,
+	fido_dev_t *dev,
+	std::vector<OfflineFIDOCredential> &offlineData,
+	const std::string &expectedRpId,
+	const std::string &origin,
+	const char *pin,
+	bool requireUserVerification,
+	std::string &serialUsed,
+	uint32_t &newSignCount)
+{
+	if (offlineData.empty())
+	{
+		pam_syslog(pamh, LOG_ERR, "signAndVerifyAssertion called with no credentials.");
+		return FIDO_ERR_INVALID_ARGUMENT;
+	}
+
+	// Defense in depth: callers should already have filtered offlineData by
+	// config.rpId. Reject if anything slipped through — never let
+	// fido_assert_set_rp run with an attacker-controlled rpId taken from a
+	// tampered offline file.
+	if (offlineData.front().rpId != expectedRpId)
+	{
+		pam_syslog(pamh, LOG_ERR, "Refusing offline auth: stored rpId '%s' does not match configured rpId '%s'.",
+			offlineData.front().rpId.c_str(), expectedRpId.c_str());
+		return FIDO_ERR_INVALID_ARGUMENT;
+	}
+
 	FIDOSignRequest signRequest;
-	signRequest.rpId = offlineData.front().rpId;
+	signRequest.rpId = expectedRpId;
 	signRequest.challenge = Convert::GenerateRandomAsBase64URL(OFFLINE_CHALLENGE_SIZE);
+	if (signRequest.challenge.empty())
+	{
+		pam_syslog(pamh, LOG_ERR, "Failed to generate random challenge for offline assertion (RAND_bytes failed).");
+		return FIDO_ERR_INTERNAL;
+	}
+	signRequest.userVerification = requireUserVerification ? "required" : "discouraged";
 	for (auto &item : offlineData)
 	{
 		if (item.rpId != signRequest.rpId)
 		{
-			pam_syslog(_pamh, LOG_ERR, "Offline data for ID %s has different rpId. Expected: %s, actual: %s", item.credId.c_str(), signRequest.rpId.c_str(), item.rpId.c_str());
-			pam_syslog(_pamh, LOG_ERR, "The data will not be used for offline authentication");
+			pam_syslog(pamh, LOG_ERR, "Offline data for ID %s has different rpId. Expected: %s, actual: %s", item.credId.c_str(), signRequest.rpId.c_str(), item.rpId.c_str());
+			pam_syslog(pamh, LOG_ERR, "The data will not be used for offline authentication");
 		}
 		else
 		{
@@ -264,7 +227,7 @@ int FIDODevice::signAndVerifyAssertion(
 
 	fido_assert_t *assert_raw = nullptr;
 	std::vector<unsigned char> cDataBytes;
-	int res = getAssert(signRequest, origin, pin, &assert_raw, cDataBytes);
+	int res = doGetAssert(pamh, dev, signRequest, origin, pin, &assert_raw, cDataBytes);
 	unique_fido_assert_t fido_assertion(assert_raw);
 
 	unique_evp_pkey_t pkey(nullptr);
@@ -291,24 +254,27 @@ int FIDODevice::signAndVerifyAssertion(
 
 		if (credUsed == nullptr)
 		{
-			pam_syslog(_pamh, LOG_ERR, "No offline credential found for the credential ID used for signing.");
+			pam_syslog(pamh, LOG_ERR, "No offline credential found for the credential ID used for signing.");
 			return FIDO_ERR_INVALID_ARGUMENT;
 		}
 
 		EVP_PKEY *pkey_raw = nullptr;
-		res = ecKeyFromCbor(credUsed->public_key_hex, &pkey_raw, &algorithm);
+		// ecKeyFromCbor's static helper handles logging; null pkey signals failure.
+		CoseKeyParseResult parseRes = parseCoseKey(credUsed->public_key_hex, &pkey_raw, &algorithm);
 		pkey.reset(pkey_raw);
 		if (!pkey)
 		{
-			pam_syslog(_pamh, LOG_ERR, "Failed to create EVP_PKEY from public key CBOR.");
-			return FIDO_ERR_INTERNAL;
-		}
-
-		// TODO other algorithms if privacyidea supports them
-		if (algorithm != COSE_ES256)
-		{
-			pam_syslog(_pamh, LOG_ERR, "Unsupported algorithm: %d", algorithm);
-			return FIDO_ERR_UNSUPPORTED_OPTION;
+			switch (parseRes)
+			{
+				case CoseKeyParseResult::UnsupportedAlgorithm:
+					pam_syslog(pamh, LOG_ERR, "Unsupported COSE algorithm in stored public key: %d", algorithm);
+					return FIDO_ERR_INVALID_ARGUMENT;
+				case CoseKeyParseResult::InvalidCbor:
+					pam_syslog(pamh, LOG_ERR, "Failed to parse CBOR public key");
+					return FIDO_ERR_INVALID_ARGUMENT;
+				default:
+					return FIDO_ERR_INTERNAL;
+			}
 		}
 
 		res = es256_pk_from_EVP_PKEY(pk.get(), pkey.get());
@@ -317,84 +283,168 @@ int FIDODevice::signAndVerifyAssertion(
 			res = fido_assert_verify(fido_assertion.get(), 0, algorithm, pk.get());
 			if (res == FIDO_OK)
 			{
+				// When UV was required (PIN-based offline auth), enforce that the
+				// authenticator actually performed user verification. libfido2's
+				// fido_assert_verify validates the signature and rpIdHash but does
+				// not enforce the UV flag — that is the verifier's job. Without
+				// this check, a device with the right credential but no PIN could
+				// satisfy an auth attempt that should have required UV.
+				const uint8_t flags = fido_assert_flags(fido_assertion.get(), 0);
+				if (requireUserVerification && !(flags & CTAP_AUTHDATA_USER_VERIFIED))
+				{
+					pam_syslog(pamh, LOG_ERR, "Offline assertion verified but user verification was required and not performed (authData flags=0x%02x).", flags);
+					return FIDO_ERR_PIN_REQUIRED;
+				}
+
 				uint32_t new_sigcount = fido_assert_sigcount(fido_assertion.get(), 0);
 				if (new_sigcount > credUsed->sign_count)
 				{
-					pam_syslog(_pamh, LOG_DEBUG, "Offline assertion verified successfully! New signature count: %u (was %u)", new_sigcount, credUsed->sign_count);
+					pam_syslog(pamh, LOG_INFO, "Offline assertion verified successfully. New signature count: %u (was %u)", new_sigcount, credUsed->sign_count);
 					newSignCount = new_sigcount;
 				}
 				else
 				{
-					pam_syslog(_pamh, LOG_ERR, "Signature counter did not increase. Possible replay attack. New: %u, Old: %u", new_sigcount, credUsed->sign_count);
+					pam_syslog(pamh, LOG_ERR, "Signature counter did not increase. Possible replay attack. New: %u, Old: %u", new_sigcount, credUsed->sign_count);
 					res = FIDO_ERR_INVALID_SIG; // Or a more specific error
 				}
 			}
 			else
 			{
-				pam_syslog(_pamh, LOG_ERR, "fido_assert_verify: %s (code: %d)", fido_strerr(res), res);
+				pam_syslog(pamh, LOG_ERR, "fido_assert_verify: %s (code: %d)", fido_strerr(res), res);
 			}
 		}
 		else
 		{
-			pam_syslog(_pamh, LOG_ERR, "es256_pk_from_EVP_PKEY: %s (code: %d)", fido_strerr(res), res);
+			pam_syslog(pamh, LOG_ERR, "es256_pk_from_EVP_PKEY: %s (code: %d)", fido_strerr(res), res);
 		}
 	}
 	else
 	{
-		pam_syslog(_pamh, LOG_ERR, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
+		pam_syslog(pamh, LOG_ERR, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
 	}
 
 	return res;
 }
 
-FIDODevice::FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo, bool log) : _pamh(pamh),
-																					   _path(fido_dev_info_path(devinfo)),
-																					   _manufacturer(fido_dev_info_manufacturer_string(devinfo)),
-																					   _product(fido_dev_info_product_string(devinfo))
+int FIDODevice::signAndVerifyAssertion(
+	std::vector<OfflineFIDOCredential> &offlineData,
+	const std::string &expectedRpId,
+	const std::string &origin,
+	const char *pin,
+	bool requireUserVerification,
+	std::string &serialUsed,
+	uint32_t &newSignCount) const
 {
-	int res = FIDO_OK;
-	unique_fido_dev_t dev = OpenFidoDevice(_pamh, _path, res);
-	if (dev == nullptr)
-	{
-		pam_syslog(_pamh, LOG_ERR, "Failed to open device %s in constructor", _path.c_str());
-		// The object will be created but in a non-functional state.
-		return;
-	}
+	int err = FIDO_OK;
+	auto dev = OpenFidoDevice(_pamh, _path, err);
+	if (err != FIDO_OK)
+		return err;
+	return doSignAndVerifyAssertion(_pamh, dev.get(), offlineData, expectedRpId, origin, pin, requireUserVerification, serialUsed, newSignCount);
+}
 
-	_hasPin = fido_dev_has_pin(dev.get());
-	_hasUV = fido_dev_has_uv(dev.get());
-	if (log)
-		pam_syslog(_pamh, LOG_DEBUG, "New FIDO device: %s hasPin: %d, hasUV: %d", toString().c_str(), _hasPin, _hasUV);
-
-	// Get detailed CBOR info
-	fido_cbor_info_t *info = fido_cbor_info_new();
-	if (info == nullptr)
+int FIDODevice::signAndVerifyAssertionOnOpenDevice(
+	std::vector<OfflineFIDOCredential> &offlineData,
+	const std::string &expectedRpId,
+	const std::string &origin,
+	const char *pin,
+	bool requireUserVerification,
+	std::string &serialUsed,
+	uint32_t &newSignCount) const
+{
+	if (_dev == nullptr)
 	{
-		pam_syslog(_pamh, LOG_ERR, "fido_cbor_info_new failed.");
-		return;
+		pam_syslog(_pamh, LOG_ERR, "signAndVerifyAssertionOnOpenDevice called without openDevice().");
+		return FIDO_ERR_INTERNAL;
 	}
+	return doSignAndVerifyAssertion(_pamh, _dev, offlineData, expectedRpId, origin, pin, requireUserVerification, serialUsed, newSignCount);
+}
 
-	res = fido_dev_get_cbor_info(dev.get(), info);
-	if (res == FIDO_OK)
-	{
-		// Algorithms
-		size_t nalg = fido_cbor_info_algorithm_count(info);
-		for (size_t i = 0; i < nalg; i++)
-		{
-			_supportedAlgorithms.push_back(fido_cbor_info_algorithm_cose(info, i));
-		}
-		// The following is not compatible with older versions of libfido2 that are available for e.g. ubuntu22
-		// Remaining Resident Keys
-		//_remainingResidentKeys = fido_cbor_info_rk_remaining(info);
-		// New PIN required
-		//_newPinRequired = fido_cbor_info_new_pin_required(info);
-	}
-	else
-	{
-		pam_syslog(_pamh, LOG_DEBUG, "fido_dev_get_cbor_info: %s (code: %d). Device may be U2F-only.", fido_strerr(res), res);
-	}
+FIDODevice::FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo)
+	: _pamh(pamh),
+	  _path(fido_dev_info_path(devinfo)),
+	  _manufacturer(fido_dev_info_manufacturer_string(devinfo)),
+	  _product(fido_dev_info_product_string(devinfo))
+{
+	// Static info from devinfo only — opening the device here would waste a
+	// USB transaction; sign() opens fresh per operation anyway.
+}
 
-	fido_cbor_info_free(&info);
+FIDODevice::FIDODevice(FIDODevice &&other) noexcept
+	: _pamh(other._pamh),
+	  _path(std::move(other._path)),
+	  _manufacturer(std::move(other._manufacturer)),
+	  _product(std::move(other._product)),
+	  _dev(other._dev)
+{
+	other._dev = nullptr;
+	other._pamh = nullptr;
+}
+
+FIDODevice &FIDODevice::operator=(FIDODevice &&other) noexcept
+{
+	if (this != &other)
+	{
+		closeDevice();
+		_pamh = other._pamh;
+		_path = std::move(other._path);
+		_manufacturer = std::move(other._manufacturer);
+		_product = std::move(other._product);
+		_dev = other._dev;
+		other._dev = nullptr;
+		other._pamh = nullptr;
+	}
+	return *this;
+}
+
+FIDODevice::~FIDODevice()
+{
+	closeDevice();
+}
+
+int FIDODevice::openDevice()
+{
+	if (_dev != nullptr)
+		return FIDO_OK; // already open
+	if (_path.empty())
+	{
+		pam_syslog(_pamh, LOG_ERR, "openDevice: no device path");
+		return FIDO_ERR_INVALID_ARGUMENT;
+	}
+	_dev = fido_dev_new();
+	if (_dev == nullptr)
+	{
+		pam_syslog(_pamh, LOG_ERR, "fido_dev_new failed");
+		return FIDO_ERR_INTERNAL;
+	}
+	int res = fido_dev_open(_dev, _path.c_str());
+	if (res != FIDO_OK)
+	{
+		pam_syslog(_pamh, LOG_ERR, "fido_dev_open: %s (code: %d)", fido_strerr(res), res);
+		fido_dev_free(&_dev);
+		_dev = nullptr;
+		return res;
+	}
+	return FIDO_OK;
+}
+
+void FIDODevice::cancelDevice()
+{
+	// fido_dev_cancel is documented thread-safe wrt a concurrent
+	// fido_dev_get_assert blocked on the same device handle. That is the
+	// whole point of having this method: another thread can unblock the
+	// worker thread that is currently waiting for user touch.
+	if (_dev != nullptr)
+		fido_dev_cancel(_dev);
+}
+
+void FIDODevice::closeDevice()
+{
+	if (_dev != nullptr)
+	{
+		fido_dev_close(_dev);
+		fido_dev_free(&_dev);
+		_dev = nullptr;
+	}
 }
 
 std::string FIDODevice::toString() const
@@ -402,20 +452,24 @@ std::string FIDODevice::toString() const
 	return "[" + _manufacturer + "][" + _product + "][" + _path + "]";
 }
 
-int FIDODevice::sign(
+// Shared implementation body for sign() variants. Packages the result of a
+// fido_dev_get_assert into a FIDOSignResponse.
+static int doSign(
+	pam_handle_t *pamh,
+	fido_dev_t *dev,
 	const FIDOSignRequest &signRequest,
 	const std::string &origin,
-	const std::string &pin,
-	FIDOSignResponse &signResponse) const
+	const char *pin,
+	FIDOSignResponse &signResponse)
 {
 	fido_assert_t *assert_raw = nullptr;
 	std::vector<unsigned char> vecClientData;
-	int res = getAssert(signRequest, origin, pin, &assert_raw, vecClientData); // The raw pointer is still named assert_raw here
+	int res = doGetAssert(pamh, dev, signRequest, origin, pin, &assert_raw, vecClientData);
 	unique_fido_assert_t fido_assertion(assert_raw);
 
 	if (res != FIDO_OK)
 	{
-		pam_syslog(_pamh, LOG_DEBUG, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
+		pam_syslog(pamh, LOG_ERR, "fido_dev_get_assert: %s (code: %d)", fido_strerr(res), res);
 		return res;
 	}
 
@@ -440,64 +494,30 @@ int FIDODevice::sign(
 	return res;
 }
 
-int FIDODevice::getAssert(
+int FIDODevice::sign(
 	const FIDOSignRequest &signRequest,
 	const std::string &origin,
-	const std::string &pin,
-	fido_assert_t **assert,
-	std::vector<unsigned char> &clientDataOut) const
+	const char *pin,
+	FIDOSignResponse &signResponse) const
 {
-	int res = FIDO_OK;
-	pam_syslog(_pamh, LOG_DEBUG, "getAssert: Opening FIDO device at %s", _path.c_str());
-	auto dev = OpenFidoDevice(_pamh, _path, res);
+	int err = FIDO_OK;
+	auto dev = OpenFidoDevice(_pamh, _path, err);
+	if (err != FIDO_OK)
+		return err;
+	return doSign(_pamh, dev.get(), signRequest, origin, pin, signResponse);
+}
 
-	if (res != FIDO_OK)
+int FIDODevice::signOnOpenDevice(
+	const FIDOSignRequest &signRequest,
+	const std::string &origin,
+	const char *pin,
+	FIDOSignResponse &signResponse) const
+{
+	if (_dev == nullptr)
 	{
-		pam_syslog(_pamh, LOG_ERR, "getAssert: OpenFidoDevice failed with error %d", res);
-		return res;
-	}
-
-	// Create assertion
-	if ((*assert = fido_assert_new()) == NULL)
-	{
-		pam_syslog(_pamh, LOG_ERR, "getAssert: fido_assert_new failed");
-		fido_dev_close(dev.get());
+		pam_syslog(_pamh, LOG_ERR, "signOnOpenDevice called without openDevice().");
 		return FIDO_ERR_INTERNAL;
 	}
-
-	std::string challenge = signRequest.challenge;
-	std::vector<unsigned char> bytes(signRequest.challenge.begin(), signRequest.challenge.end());
-	challenge = Convert::Base64URLEncode(bytes.data(), bytes.size());
-	std::string cData = "{\"type\": \"webauthn.get\", \"challenge\": \"" + challenge + "\", \"origin\": \"" + origin + "\", \"crossOrigin\": false}";
-	clientDataOut = std::vector<unsigned char>(cData.begin(), cData.end());
-	res = fido_assert_set_clientdata(*assert, clientDataOut.data(), clientDataOut.size());
-	if (res != FIDO_OK)
-	{
-		pam_syslog(_pamh, LOG_DEBUG, "fido_assert_set_clientdata: %s (code: %d)", fido_strerr(res), res);
-	}
-	// RP
-	res = fido_assert_set_rp(*assert, signRequest.rpId.c_str());
-	if (res != FIDO_OK)
-	{
-		pam_syslog(_pamh, LOG_DEBUG, "fido_assert_set_rp: %s (code: %d)", fido_strerr(res), res);
-	}
-
-	// User verification
-	bool hasUV = fido_dev_has_uv(dev.get());
-	pam_syslog(_pamh, LOG_DEBUG, "Device has user verification: %d and request is: %s", hasUV, signRequest.userVerification.c_str());
-
-	if (hasUV && signRequest.userVerification == "discouraged")
-	{
-		res = fido_assert_set_uv(*assert, FIDO_OPT_FALSE);
-		if (res != FIDO_OK)
-		{
-			pam_syslog(_pamh, LOG_DEBUG, "fido_assert_set_uv: %s (code: %d)", fido_strerr(res), res);
-		}
-		else
-		{
-			pam_syslog(_pamh, LOG_DEBUG, "User verification set to 'discouraged'");
-		}
-	}
-	// Get assert and close
-	return fido_dev_get_assert(dev.get(), *assert, pin.empty() ? NULL : pin.c_str());
+	return doSign(_pamh, _dev, signRequest, origin, pin, signResponse);
 }
+

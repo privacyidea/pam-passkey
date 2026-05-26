@@ -1,0 +1,10 @@
+{
+  "detail": {
+    "message": "Authentication failed."
+  },
+  "result": {
+    "authentication": "REJECT",
+    "status": true,
+    "value": false
+  }
+}

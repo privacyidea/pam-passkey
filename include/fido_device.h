@@ -38,29 +38,59 @@ constexpr auto OFFLINE_CHALLENGE_SIZE = 64;
 class FIDODevice
 {
 public:
-	static std::vector<FIDODevice> getDevices(pam_handle_t *pamh, bool log = true);
+	static std::vector<FIDODevice> getDevices(pam_handle_t *pamh);
 
-	FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo, bool log = true);
+	FIDODevice(pam_handle_t *pamh, const fido_dev_info_t *devinfo);
 	FIDODevice() = default;
+	~FIDODevice();
 
+	// Move-only: holding a libfido2 device handle is owning state, copying would
+	// share the same fido_dev_t between instances and double-free on destruction.
+	FIDODevice(const FIDODevice &) = delete;
+	FIDODevice &operator=(const FIDODevice &) = delete;
+	FIDODevice(FIDODevice &&) noexcept;
+	FIDODevice &operator=(FIDODevice &&) noexcept;
+
+	// One-shot APIs that open the device, perform the operation, and close it.
+	// Use these for single-device flows.
 	int sign(
 		const FIDOSignRequest &signRequest,
 		const std::string &origin,
-		const std::string &pin,
+		const char *pin,
 		FIDOSignResponse &signResponse) const;
 
 	int signAndVerifyAssertion(
 		std::vector<OfflineFIDOCredential> &offlineData,
+		const std::string &expectedRpId,
 		const std::string &origin,
-		const std::string &pin,
+		const char *pin,
+		bool requireUserVerification,
 		std::string &serialUsed,
 		uint32_t &newSignCount) const;
 
-	std::string getPath() const { return _path; }
-	std::string getManufacturer() const { return _manufacturer; }
-	std::string getProduct() const { return _product; }
-	bool hasPin() const noexcept { return _hasPin; }
-	bool hasUV() const noexcept { return _hasUV; }
+	// Parallel-touch APIs: openDevice() leaves the handle open so that one
+	// thread can block inside signOnOpenDevice/signAndVerifyAssertionOnOpenDevice
+	// while a different thread calls cancelDevice() to unblock it. This lets
+	// the module race multiple connected security keys against each other and
+	// use whichever the user touches first.
+	int openDevice();
+	void cancelDevice();
+	void closeDevice();
+
+	int signOnOpenDevice(
+		const FIDOSignRequest &signRequest,
+		const std::string &origin,
+		const char *pin,
+		FIDOSignResponse &signResponse) const;
+
+	int signAndVerifyAssertionOnOpenDevice(
+		std::vector<OfflineFIDOCredential> &offlineData,
+		const std::string &expectedRpId,
+		const std::string &origin,
+		const char *pin,
+		bool requireUserVerification,
+		std::string &serialUsed,
+		uint32_t &newSignCount) const;
 
 	std::string toString() const;
 
@@ -69,23 +99,10 @@ private:
 	std::string _path;
 	std::string _manufacturer;
 	std::string _product;
-	bool _hasPin = false;
-	bool _hasUV = false;
-	std::vector<int> _supportedAlgorithms;
-	long _remainingResidentKeys = -1;
-	bool _newPinRequired = false;
+	// Non-null between openDevice() and closeDevice(). Manually managed because
+	// fido_dev_cancel needs to be callable on it from a different thread.
+	fido_dev_t *_dev = nullptr;
 
-	int getAssert(
-		const FIDOSignRequest &signRequest,
-		const std::string &origin,
-		const std::string &pin,
-		fido_assert_t **assert,
-		std::vector<unsigned char> &clientDataOut) const;
-
-	int ecKeyFromCbor(
-		const std::string &cborPubKey,
-		EVP_PKEY **pkey,
-		int *algorithm) const;
 };
 
 #endif // FIDO_DEVICE_H

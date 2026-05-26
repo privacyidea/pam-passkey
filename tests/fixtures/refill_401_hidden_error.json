@@ -1,0 +1,10 @@
+{
+  "detail": null,
+  "result": {
+    "error": {
+      "code": 401,
+      "message": "Failed offline token refill"
+    },
+    "status": false
+  }
+}

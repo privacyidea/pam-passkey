@@ -1,0 +1,10 @@
+{
+  "detail": null,
+  "result": {
+    "error": {
+      "code": 905,
+      "message": "ERR905: The token is not valid."
+    },
+    "status": false
+  }
+}

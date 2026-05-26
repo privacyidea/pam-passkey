@@ -11,8 +11,8 @@ struct Response
     std::optional<FIDOSignRequest> signRequest;
 
     std::string errorMessage;
-    int errorCode;
-    std::string username = "";
+    int errorCode = 0;
+    std::string username;
     bool authenticationSuccess = false;
 };
 

@@ -1,0 +1,10 @@
+{
+  "detail": {},
+  "result": {
+    "error": {
+      "code": 403,
+      "message": "The challenge 11509646551125402882 is not meant for the token 123456."
+    },
+    "status": false
+  }
+}

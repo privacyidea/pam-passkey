@@ -1,0 +1,12 @@
+{
+  "detail": {
+    "message": "Found matching challenge",
+    "serial": "PIPK00000C99",
+    "username": "hans"
+  },
+  "result": {
+    "authentication": "ACCEPT",
+    "status": true,
+    "value": true
+  }
+}
