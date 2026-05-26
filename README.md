@@ -7,8 +7,8 @@ This module does not work with Ubuntu 22, as it requires libfido2 in version 1.1
 
 - FIDO2/Passkey (WebAuthn) authentication.
 - Online authentication against a privacyIDEA server.
-- Offline authentication using locally stored credentials, with replay protection against signature reuse. **Only ES256 credentials work offline** — tokens registered with RSA-based algorithms authenticate online only. In practice this affects very few authenticators; YubiKey, Solokey, and platform passkey defaults are all ES256.
-- Support for multiple connected FIDO devices: when several security keys are plugged in at once, the module talks to them all in parallel and uses whichever one you touch first.
+- Offline authentication using locally stored credentials, including signature counter protection against replay attacks. **Offline mode supports only ES256 (COSE alg `-7`) credentials.**
+- Support for multiple connected FIDO devices.
 - PIN-based user verification for both online and offline modes.
 - Usernameless offline authentication.
 
@@ -28,7 +28,7 @@ Here is a list of all available configuration options:
 | Option | Description | Required | Example |
 |---|---|---|---|
 | `url` | The base URL of your privacyIDEA server. | **Yes** (for online auth) | `url=https://privacyidea.example.com` |
-| `rpid` | The Relying Party ID for your FIDO2 credentials. Must match the RP ID configured in privacyIDEA. | **Yes** | `rpid=example.com` |
+| `rpid` | The Relying Party ID for your FIDO2 credentials. This must match the RP ID configured in privacyIDEA! The module also sends `Origin: https://<rpid>` on every request and uses the same value as `clientData.origin` in the WebAuthn assertion.| **Yes** | `rpid=example.com` |
 | `debug` | Enables verbose debug logging to syslog. | No | `debug` |
 | `nossl` (alias: `no_ssl`) | Disables SSL certificate verification for requests to the privacyIDEA server. **Use with caution, only for testing.** | No | `nossl` |
 | `cacert` (alias: `ca_cert`) | Path to a CA bundle or certificate to verify the privacyIDEA server's TLS certificate against. Useful in on-prem deployments with a private CA when you do not want to install the CA in the system trust store. Ignored if `nossl` is set. | No | `cacert=/etc/privacyidea/ca.pem` |
@@ -57,11 +57,9 @@ auth [success=done authinfo_unavail=ignore default=bad] pam_privacyidea_passkey.
 auth required pam_unix.so
 ```
 
-A timeout on the PIN prompt itself is intentionally not implemented; the two mechanisms above are the supported ways to skip.
-
 ## Usernameless Online Authentication
 
-The module also supports usernameless **online** authentication: if no username is supplied to PAM, the security key selects a discoverable credential, privacyIDEA identifies the user from it, and the resulting username is propagated to the rest of the PAM stack.
+The module also supports usernameless **online** authentication: if the PAM stack does not provide a username, the server-side passkey challenge is initiated without a user, the FIDO device selects a discoverable credential automatically, and privacyIDEA identifies the user from the `userHandle` returned by the device. The resulting username is then set in the PAM context (`PAM_USER`).
 
 ---
 
@@ -70,24 +68,17 @@ The module also supports usernameless **online** authentication: if no username 
 To use offline authentication, you must first provision the offline credentials from the privacyIDEA server.
 
 ### Online / Offline Precedence
-The module always tries online authentication first. Offline mode is used only when the privacyIDEA server cannot be reached at all — for example, when the network is down or DNS fails. Any actual response from the server (including a rejection) is treated as authoritative; the module does not silently fall back to offline data in that case. The presence of an offline credential file alone does not change this; it exists purely as a fallback when the server is unreachable.
+The module always attempts online authentication first. Offline mode is only used as a fallback when the request to the privacyIDEA server fails with a network-level error (cURL `COULDNT_RESOLVE_HOST`, `COULDNT_CONNECT`, `OPERATION_TIMEDOUT`, `RECV_ERROR`, `SEND_ERROR`). Any other server response — including HTTP errors, malformed JSON, or an explicit authentication rejection — does **not** trigger the offline path. The presence of an offline credential file alone does not change this, offline data exists purely as a fallback when the server is unreachable.
 
-While online, the module also refreshes stored offline credentials in the background so they stay in sync with the server even when the user is authenticating online.
+While online, the module also opportunistically calls `/validate/offlinerefill` for every stored offline credential at the start of each authentication, to check the state of the stored offline credentials.
 
 ### Provisioning Offline Credentials
-An offline credential is created by performing at least one successful **online** authentication with a FIDO token that has been configured for offline use on its token detail page in privacyIDEA. During that online login the necessary credential data is sent to the module and stored locally in the file specified by `offlineFile`. Only ES256 credentials are usable offline; see the [Features](#features) section.
+An offline credential is created by performing at least one successful **online** authentication with a FIDO token that has been configured for offline use on the corresponding token detail page. During this successful online login, the necessary credential data (public key, credential ID, etc.) is sent to the PAM module and stored locally in the file specified by the `offlineFile` option. Make sure to set permissions on that file accordingly. Only ES256 credentials are usable offline; see the [Features](#features) section.
 
 ### Usernameless Offline Authentication
-If no username is supplied to PAM (for example at a display manager's login screen), the module attempts usernameless offline authentication against all stored offline credentials and identifies the user from whichever credential signs successfully.
+If the PAM stack does not provide a username (e.g., during a pre-login authentication scenario like `lightdm`), the module will attempt a usernameless offline authentication. It will use all available offline credentials and, upon successful authentication with a security key, will identify the user from the credential that was used. The identified username is then set in the PAM context (`PAM_USER`).
 
-If a username is supplied, only that user's offline credentials are tried.
-
-### Multiple Credentials per Key
-
-If your security key holds more than one account for the same server (for example several privacyIDEA users registered on the same key), here is how the module picks one:
-
-- **When a username is supplied to PAM** (the normal case for `sudo`, `login`, `sshd`): no ambiguity. Online, the server tells the key which credential to use. Offline, the module only considers credentials stored for that user.
-- **In usernameless mode** (for example some display managers at the login screen): the key picks one itself, usually the most recently used account. This module deliberately does not show a "choose an account" menu, because such a prompt would render unreliably across the many programs that use PAM. If you need to sign in as a specific account, log in with that username instead of relying on usernameless mode.
+If a username is provided by the PAM stack, the module will only attempt to use the offline credentials associated with that specific user.
 
 ## Build and Installation
 
