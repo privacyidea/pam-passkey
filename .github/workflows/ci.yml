@@ -78,7 +78,7 @@ jobs:
             libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
             nlohmann-json3-dev libpam0g-dev
       - name: Cache FetchContent (gtest)
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/_deps
           key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-${{ matrix.build_type }}
@@ -109,7 +109,7 @@ jobs:
             libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
             nlohmann-json3-dev libpam0g-dev
       - name: Cache FetchContent (gtest)
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/_deps
           key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-sanitizers
