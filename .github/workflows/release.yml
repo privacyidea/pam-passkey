@@ -33,15 +33,6 @@ jobs:
           cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel
 
-      - name: Stage release binary
-        run: |
-          # Name the asset with the tag and build platform, since a bare
-          # pam_privacyidea_passkey.so gives no hint which distro/arch it is
-          # (built on ubuntu-24.04, x86_64, against that distro's libfido2).
-          mkdir -p dist
-          cp build/lib/pam_privacyidea_passkey.so \
-            "dist/pam_privacyidea_passkey-${GITHUB_REF_NAME}-ubuntu-24.04-x86_64.so"
-
       - name: Extract changelog section
         id: changelog
         run: |
@@ -92,4 +83,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
             $prerelease \
-            dist/*.so
+            "build/lib/pam_privacyidea_passkey.so#pam_privacyidea_passkey.so (built on Ubuntu 24.04, x86_64)"
