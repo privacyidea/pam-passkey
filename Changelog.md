@@ -1,4 +1,4 @@
-# 1.1.0 TBD
+# 1.1.0 2026-07-03
 
 ## Improvements
 - **Parallel device polling.** When multiple security keys are connected at the same time, the module now talks to them in parallel — whichever key you touch first is the one used. Previously the user had to touch a specific key chosen by the module.
