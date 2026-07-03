@@ -1,0 +1,72 @@
+name: Release
+
+# Publish a GitHub release whenever a version tag is pushed. The release body
+# is the matching section extracted from Changelog.md, so the changelog stays
+# the single source of truth for release notes.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          # Tag "v1.1.0" -> version "1.1.0". The changelog headers are
+          # "# <version> <date>", so match a header whose first token is
+          # exactly this version and capture until the next "# " header.
+          version="${GITHUB_REF_NAME#v}"
+
+          section="$(awk -v ver="$version" '
+            # Header line: "# <version> ..."
+            /^# / {
+              if (found) { exit }             # reached the next release, stop
+              split($0, f, " ")               # f[2] is the version token
+              if (f[2] == ver) { found = 1; next }
+            }
+            found { print }
+          ' Changelog.md)"
+
+          # Trim a trailing "---" separator and surrounding blank lines.
+          section="$(printf '%s\n' "$section" | sed -e 's/[[:space:]]*$//')"
+          section="$(printf '%s\n' "$section" | awk 'BEGIN{RS="";ORS="\n"}1' | sed '/^---$/d')"
+
+          if [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
+            echo "::error::No changelog section found for version '$version' in Changelog.md"
+            exit 1
+          fi
+
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "$section"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass notes via env, not inline ${{ }}, to avoid template injection.
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          # Mark pre-release for tags like v1.1.0dev1 / v1.2.0-rc1.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *dev*|*rc*|*alpha*|*beta*) prerelease="--prerelease" ;;
+          esac
+
+          printf '%s' "$RELEASE_NOTES" > release-notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            $prerelease

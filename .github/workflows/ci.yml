@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# CI only builds and tests; it never needs to write back to the repo.
+permissions:
+  contents: read
+
 jobs:
   # Build the PAM module against the libraries shipped by each target distro.
   # The README states Ubuntu 22 is unsupported (libfido2 too old) so we only
@@ -45,7 +49,9 @@ jobs:
               nlohmann-json3-dev libpam0g-dev \
               ca-certificates git
           fi
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Configure
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -61,7 +67,9 @@ jobs:
       matrix:
         build_type: [Debug, Release]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -70,7 +78,7 @@ jobs:
             libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
             nlohmann-json3-dev libpam0g-dev
       - name: Cache FetchContent (gtest)
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/_deps
           key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-${{ matrix.build_type }}
@@ -90,7 +98,9 @@ jobs:
     name: Sanitizers (ASan+UBSan)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -99,7 +109,7 @@ jobs:
             libfido2-dev libcbor-dev libcurl4-openssl-dev libssl-dev \
             nlohmann-json3-dev libpam0g-dev
       - name: Cache FetchContent (gtest)
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/_deps
           key: fetchcontent-gtest-v1.14.0-${{ runner.os }}-sanitizers
@@ -125,7 +135,9 @@ jobs:
     name: clang-tidy
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           sudo apt-get update
